@@ -67,7 +67,7 @@ in `__tests__/` for JavaScript and TypeScript; `*_test.go`, `*_test.py`, `test_*
 `FooTests` for Java, Kotlin, PHP and Swift; and top-level files in Rust's `tests/`. A spec named anything else
 is not audited. There is one `spec_command`, so a repository with specs in two languages needs one that
 dispatches on the file. The harness checks coverage of changed spec **files** and validates cited lines; exhaustive discovery of every
-example is not yet enforced. The model is asked to audit every example. A check that passes its time or
+example is not yet enforced. The model is asked to audit every example the diff adds or changes. A check that passes its time or
 output limit counts as failed, with exit 124. Anything in a check's output that looks like a secret reaches
 state and prompts as `[REDACTED]`.
 

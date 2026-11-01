@@ -1011,6 +1011,14 @@ class HarnessTest < Minitest::Test
     assert_equal "fail", verification_of(run).dig("spec_audit", "specs", 0, "mutation", "result")
   end
 
+  def test_a_patch_ending_on_its_changed_line_applies_mid_file
+    File.write(File.join(@repo, "long.rb"), "one\ntwo\nthree\nfour\n")
+    commit_base("long file")
+    patch = "diff --git a/long.rb b/long.rb\n--- a/long.rb\n+++ b/long.rb\n@@ -2,2 +2,2 @@\n two\n-three\n+THREE\n"
+    Giraffe::Git.new.apply(@repo, patch)
+    assert_equal "one\ntwo\nTHREE\nfour\n", File.read(File.join(@repo, "long.rb"))
+  end
+
   def test_mutation_cannot_edit_a_spec_helper_already_changed_by_a_checkout_hook
     FileUtils.mkdir_p(File.join(@repo, "test"))
     File.write(File.join(@repo, "test/helper.rb"), "FAIL = false # original\n")
