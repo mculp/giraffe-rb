@@ -23,7 +23,7 @@ class RunnerTest < Minitest::Test
     Giraffe::Runners::Claude.new(config, command: @command).call(step: "review", prompt: "private prompt", schema: schema,
       cwd: Dir.pwd, writable: writable, budget_usd: 1.5)
   end
-  def success = {"type" => "result", "subtype" => "success", "is_error" => false, "structured_output" => {"answer" => "ok"}, "total_cost_usd" => 0.12, "num_turns" => 2}
+  def success = {"type" => "result", "subtype" => "success", "is_error" => false, "structured_output" => {"output" => {"answer" => "ok"}}, "total_cost_usd" => 0.12, "num_turns" => 2}
 
   def test_cli_flags_remove_unneeded_capabilities_and_keep_prompt_on_stdin
     result = call(success)
@@ -58,9 +58,27 @@ class RunnerTest < Minitest::Test
   end
 
   def test_structured_output_returns_with_its_usage_for_the_caller_to_judge
-    result = call(success.merge("structured_output" => {"answer" => 42}))
+    result = call(success.merge("structured_output" => {"output" => {"answer" => 42}}))
     assert_equal({"answer" => 42}, result["output"])
     assert_in_delta 0.12, result["usage"]["cost_usd"]
+  end
+
+  def test_every_role_schema_is_sent_with_a_top_level_the_api_accepts
+    Dir[File.expand_path("../schemas/*.json", __dir__)].each do |path|
+      role_schema = JSON.parse(File.read(path))
+      command = FakeCommand.new(success)
+      Giraffe::Runners::Claude.new(config, command: command).call(step: "review", prompt: "p", schema: role_schema, cwd: Dir.pwd, budget_usd: 1)
+      argv = command.requests.last.first
+      sent = JSON.parse(argv[argv.index("--json-schema") + 1])
+      assert_equal "object", sent["type"], path
+      assert_empty sent.keys & %w[oneOf anyOf allOf], path
+      assert_equal role_schema, sent.dig("properties", "output"), path
+    end
+  end
+
+  def test_a_failed_call_says_why_in_claudes_own_words
+    error = assert_raises(Giraffe::Error) { call(success.merge("is_error" => true, "result" => "You've hit your 5-hour limit")) }
+    assert_includes error.message, "5-hour limit"
   end
 
   def test_malformed_json_and_error_result_are_refused

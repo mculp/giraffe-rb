@@ -8,6 +8,9 @@ module Giraffe
   module Runners
     class Claude
       MIN_VERSION = Gem::Version.new("2.1.312")
+      # The API refuses a oneOf at the top of a tool's schema, and every role's schema is one. So the shape travels
+      # one level down and comes back the same way; Model still validates what is inside.
+      ENVELOPE = "output"
       def initialize(config, command: Command.new)
         @config, @command = config, command
         @checked = false
@@ -20,7 +23,7 @@ module Giraffe
         tools += %w[Edit Write] if writable
         allowed = %w[Read Grep Glob]
         allowed << "Edit(/**)" if writable
-        argv = [@config["claude_bin"], "-p", "--output-format", "json", "--json-schema", JSON.generate(schema),
+        argv = [@config["claude_bin"], "-p", "--output-format", "json", "--json-schema", JSON.generate(enveloped(schema)),
                 "--setting-sources", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
                 "--permission-mode", "dontAsk", "--tools", tools.join(","), "--allowedTools", *allowed,
                 "--disallowedTools", "Bash", "Agent", "Task", "WebFetch", "WebSearch", "mcp__*",
@@ -35,17 +38,19 @@ module Giraffe
                                   timeout: @config["call_timeout"])
         doc = JSON.parse(result["stdout"])
         usage = {"cost_usd" => doc.fetch("total_cost_usd", 0.0), "turns" => doc.fetch("num_turns", 0)}
-        unless result["status"].zero? && doc["type"] == "result" && doc["subtype"] == "success" && !doc["is_error"] && doc.key?("structured_output")
-          error = Error.new("Claude #{step} did not return a successful structured result (#{doc['subtype'] || result['status']})")
+        unless result["status"].zero? && doc["type"] == "result" && doc["subtype"] == "success" && !doc["is_error"] && doc["structured_output"].is_a?(Hash) && doc["structured_output"].key?(ENVELOPE)
+          error = Error.new("Claude #{step} did not return a successful structured result: #{Command.tail((doc['result'] || doc['subtype'] || result['status']).to_s)}")
           error.usage = usage
           raise error
         end
-        {"output" => doc["structured_output"], "usage" => usage}
+        {"output" => doc["structured_output"][ENVELOPE], "usage" => usage}
       rescue JSON::ParserError
         raise InvalidOutput, "Claude returned malformed JSON"
       end
 
       private
+
+      def enveloped(schema) = {"type" => "object", "properties" => {ENVELOPE => schema}, "required" => [ENVELOPE], "additionalProperties" => false}
 
       def check_version!(cwd)
         version = @command.run!([@config["claude_bin"], "--version"], cwd: cwd, timeout: 15)[/\d+\.\d+\.\d+/]

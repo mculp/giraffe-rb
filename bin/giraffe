@@ -65,6 +65,6 @@ begin
            end
   puts JSON.pretty_generate(output)
 rescue StandardError => error
-  warn JSON.generate("error" => error.message)
+  warn JSON.generate({"path" => run&.path, "error" => error.message}.compact)
   exit 1
 end
