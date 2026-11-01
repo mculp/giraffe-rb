@@ -1,0 +1,32 @@
+{
+  "failure_contract_version": 1,
+  "execution_contract_version": 1,
+  "max_consecutive_cycles": 3,
+  "envelope": {
+    "required": ["v", "run_id", "seq", "ts", "session", "e"]
+  },
+  "events": {
+    "finding": {
+      "required": [
+        "occurrence_id",
+        "failure_id",
+        "source_node",
+        "source_attempt_id",
+        "candidate_sha",
+        "revision",
+        "reason",
+        "artifact_ids"
+      ]
+    },
+    "stop": {
+      "required": [
+        "stop_id",
+        "failure_id",
+        "triggering_occurrence_id",
+        "processed_cycles",
+        "batch_ids",
+        "reason"
+      ]
+    }
+  }
+}

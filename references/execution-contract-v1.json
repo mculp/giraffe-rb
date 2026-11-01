@@ -1,0 +1,188 @@
+{
+  "contract_version": 1,
+  "graph": {
+    "nodes": [
+      "TRIAGE",
+      "INVESTIGATE",
+      "PLAN",
+      "WORKTREE",
+      "REPRODUCE",
+      "BUILD",
+      "VERIFY",
+      "SELF-REVIEW",
+      "PUBLISH",
+      "CI-WATCH",
+      "BOT-FEEDBACK",
+      "VALIDATE",
+      "REVIEW-APP",
+      "DESC-SYNC",
+      "DONE"
+    ],
+    "dependencies": {
+      "TRIAGE": [],
+      "INVESTIGATE": ["TRIAGE"],
+      "PLAN": ["INVESTIGATE", "REPRODUCE"],
+      "WORKTREE": ["TRIAGE"],
+      "REPRODUCE": ["INVESTIGATE", "WORKTREE"],
+      "BUILD": ["PLAN", "WORKTREE"],
+      "VERIFY": ["BUILD"],
+      "SELF-REVIEW": ["VERIFY"],
+      "PUBLISH": ["VERIFY"],
+      "CI-WATCH": ["PUBLISH"],
+      "BOT-FEEDBACK": ["PUBLISH"],
+      "VALIDATE": ["PUBLISH"],
+      "REVIEW-APP": ["PUBLISH"],
+      "DESC-SYNC": ["PUBLISH"],
+      "DONE": ["PUBLISH", "CI-WATCH", "BOT-FEEDBACK", "DESC-SYNC"]
+    },
+    "conditional_gates": {
+      "DONE": [
+        {"node": "VALIDATE", "when": "validate_named"},
+        {"node": "REVIEW-APP", "when": "ui_yes"}
+      ]
+    },
+    "legal_edges": [
+      ["TRIAGE", "INVESTIGATE"],
+      ["TRIAGE", "WORKTREE"],
+      ["INVESTIGATE", "PLAN"],
+      ["INVESTIGATE", "REPRODUCE"],
+      ["WORKTREE", "REPRODUCE"],
+      ["REPRODUCE", "PLAN"],
+      ["PLAN", "BUILD"],
+      ["WORKTREE", "BUILD"],
+      ["BUILD", "VERIFY"],
+      ["VERIFY", "PUBLISH"],
+      ["VERIFY", "SELF-REVIEW"],
+      ["SELF-REVIEW", "PUBLISH"],
+      ["PUBLISH", "CI-WATCH"],
+      ["PUBLISH", "BOT-FEEDBACK"],
+      ["PUBLISH", "VALIDATE"],
+      ["PUBLISH", "REVIEW-APP"],
+      ["PUBLISH", "DESC-SYNC"],
+      ["CI-WATCH", "DESC-SYNC"],
+      ["BOT-FEEDBACK", "DESC-SYNC"],
+      ["VALIDATE", "DESC-SYNC"],
+      ["REVIEW-APP", "DESC-SYNC"],
+      ["DESC-SYNC", "DONE"],
+      ["VERIFY", "BUILD"],
+      ["SELF-REVIEW", "BUILD"],
+      ["CI-WATCH", "BUILD"],
+      ["BOT-FEEDBACK", "BUILD"],
+      ["VALIDATE", "BUILD"],
+      ["REVIEW-APP", "BUILD"]
+    ]
+  },
+  "envelope": {
+    "required": ["v", "run_id", "seq", "ts", "session", "e"],
+    "properties": {
+      "v": {"type": "integer", "const": 1},
+      "run_id": {"type": "string", "format": "uuid"},
+      "seq": {"type": "integer", "minimum": 1},
+      "ts": {"type": "string", "format": "utc_timestamp"},
+      "session": {"type": "string", "format": "session"},
+      "e": {"type": "string"}
+    }
+  },
+  "common_properties": {
+    "note": {"type": "string"}
+  },
+  "events": {
+    "run_start": {
+      "required": ["ticket", "entry"],
+      "properties": {
+        "ticket": {"type": "string", "min_length": 1},
+        "entry": {"type": "string", "enum": ["ticket", "adopt"]},
+        "branch": {"type": "string", "min_length": 1},
+        "pr": {"type": "integer", "minimum": 1}
+      }
+    },
+    "triage": {
+      "required": ["fanout", "ui_hint", "reason"],
+      "properties": {
+        "fanout": {"type": "boolean"},
+        "ui_hint": {"type": "string", "enum": ["yes", "no", "unknown"]},
+        "reason": {"type": "string", "min_length": 1}
+      }
+    },
+    "node": {
+      "required": ["node", "phase", "attempt_id", "iteration"],
+      "properties": {
+        "node": {"type": "string", "format": "node"},
+        "phase": {"type": "string", "enum": ["start", "partial", "done"]},
+        "attempt_id": {"type": "string", "format": "uuid"},
+        "iteration": {"type": "integer", "minimum": 1},
+        "label": {"type": "string", "min_length": 1}
+      }
+    },
+    "edge": {
+      "required": ["from", "to", "from_attempt_id", "reason"],
+      "properties": {
+        "from": {"type": "string", "format": "node"},
+        "to": {"type": "string", "format": "node"},
+        "from_attempt_id": {"type": "string", "format": "uuid"},
+        "finding_id": {"type": "string", "min_length": 1},
+        "reason": {"type": "string", "min_length": 1}
+      }
+    },
+    "outcome": {
+      "required": ["kind", "attempt_id", "pass", "n"],
+      "properties": {
+        "kind": {"type": "string", "enum": ["verify", "ci", "bot", "self_review", "browser", "scoring"]},
+        "attempt_id": {"type": "string", "format": "uuid"},
+        "pass": {"type": "boolean"},
+        "n": {"type": "integer", "minimum": 0}
+      }
+    },
+    "task": {
+      "required": ["node", "attempt_id", "task_id", "desc"],
+      "properties": {
+        "node": {"type": "string", "format": "node"},
+        "attempt_id": {"type": "string", "format": "uuid"},
+        "task_id": {"type": ["string", "integer"]},
+        "desc": {"type": "string", "min_length": 1}
+      }
+    },
+    "wake": {
+      "required": ["node", "attempt_id", "wake_id", "kind", "state"],
+      "properties": {
+        "node": {"type": "string", "format": "node"},
+        "attempt_id": {"type": "string", "format": "uuid"},
+        "wake_id": {"type": "string", "format": "uuid"},
+        "kind": {"type": "string", "enum": ["shell", "ci", "bot", "review_app", "timer", "external"]},
+        "state": {"type": "string", "enum": ["registered", "armed", "fired", "cancelled", "expired"]}
+      }
+    },
+    "usage": {
+      "required": ["node", "source", "calls"],
+      "properties": {
+        "node": {"type": "string", "format": "node_or_orchestrator"},
+        "label": {"type": "string"},
+        "model": {"type": ["string", "null"]},
+        "generation_id": {"type": ["string", "null"]},
+        "subagent_id": {"type": ["string", "null"]},
+        "source": {"type": "string", "min_length": 1},
+        "input": {"type": "integer", "minimum": 0},
+        "cache_w5": {"type": "integer", "minimum": 0},
+        "cache_w1": {"type": "integer", "minimum": 0},
+        "cache_read": {"type": "integer", "minimum": 0},
+        "output": {"type": "integer", "minimum": 0},
+        "calls": {"type": "integer", "minimum": 0},
+        "duration_ms": {"type": ["integer", "null"], "minimum": 0},
+        "charged_cents": {"type": "number", "minimum": 0}
+      }
+    },
+    "publish": {
+      "required": ["pr", "candidate_sha"],
+      "properties": {
+        "pr": {"type": "integer", "minimum": 1},
+        "candidate_sha": {"type": "string", "format": "git_sha"}
+      }
+    },
+    "done": {
+      "required": ["candidate_sha"],
+      "properties": {
+        "candidate_sha": {"type": "string", "format": "git_sha"}
+      }
+    }
+  }
+}

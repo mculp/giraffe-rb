@@ -1,0 +1,82 @@
+{
+  "artifact_contract_version": 1,
+  "execution_contract_version": 1,
+  "families": {
+    "triage_brief": {"nodes": ["TRIAGE"], "quality": false, "wake_required": false},
+    "investigation_report": {"nodes": ["INVESTIGATE"], "quality": false, "wake_required": false},
+    "implementation_plan": {"nodes": ["PLAN"], "quality": false, "wake_required": false},
+    "test_plan": {"nodes": ["PLAN"], "quality": false, "wake_required": false},
+    "worktree_manifest": {"nodes": ["WORKTREE"], "quality": false, "wake_required": false},
+    "repro_report": {"nodes": ["REPRODUCE"], "quality": false, "wake_required": false},
+    "build_manifest": {"nodes": ["BUILD"], "quality": false, "wake_required": false},
+    "verification": {"nodes": ["VERIFY"], "quality": true, "wake_required": false},
+    "self_review": {"nodes": ["BUILD", "SELF-REVIEW"], "quality": true, "wake_required": false},
+    "publish_manifest": {"nodes": ["PUBLISH"], "quality": false, "wake_required": false},
+    "ci_result": {"nodes": ["CI-WATCH"], "quality": true, "wake_required": true},
+    "bot_feedback": {"nodes": ["BOT-FEEDBACK"], "quality": true, "wake_required": true},
+    "validation": {"nodes": ["VALIDATE"], "quality": true, "wake_required": false},
+    "browser_review": {"nodes": ["REVIEW-APP"], "quality": true, "wake_required": true},
+    "description": {"nodes": ["DESC-SYNC"], "quality": false, "wake_required": false},
+    "done_manifest": {"nodes": ["DONE"], "quality": false, "wake_required": false}
+  },
+  "envelope": {
+    "required": ["v", "run_id", "seq", "ts", "session", "e"],
+    "properties": {
+      "v": {"type": "integer", "const": 1},
+      "run_id": {"type": "string", "format": "uuid"},
+      "seq": {"type": "integer", "minimum": 1},
+      "ts": {"type": "string", "format": "utc_timestamp"},
+      "session": {"type": "string", "format": "session"},
+      "e": {"type": "string"}
+    }
+  },
+  "events": {
+    "artifact": {
+      "required": [
+        "artifact_id",
+        "family",
+        "node",
+        "attempt_id",
+        "producer",
+        "input_sha",
+        "candidate_sha",
+        "content_ref",
+        "content_sha256",
+        "content_bytes",
+        "content_type",
+        "wake_id",
+        "perspective",
+        "covered_outcomes"
+      ],
+      "properties": {
+        "artifact_id": {"type": "string", "format": "uuid"},
+        "family": {"type": "string", "format": "artifact_family"},
+        "node": {"type": "string", "format": "node"},
+        "attempt_id": {"type": "string", "format": "uuid"},
+        "producer": {"type": "string", "min_length": 1},
+        "input_sha": {"type": "string", "format": "git_sha"},
+        "candidate_sha": {"type": ["string", "null"], "format": "git_sha"},
+        "content_ref": {"type": "string", "format": "artifact_ref"},
+        "content_sha256": {"type": "string", "format": "sha256"},
+        "content_bytes": {"type": "integer", "minimum": 0},
+        "content_type": {"type": "string", "min_length": 1},
+        "wake_id": {"type": ["string", "null"], "format": "uuid"},
+        "perspective": {
+          "type": "string",
+          "enum": ["author", "independent_review", "automated_check", "external_service", "rendered_ui", "operator"]
+        },
+        "covered_outcomes": {"type": "array", "items": {"type": "string", "format": "outcome_id"}}
+      }
+    },
+    "link": {
+      "required": ["link_id", "relation", "from_artifact_id", "to_artifact_id", "reason"],
+      "properties": {
+        "link_id": {"type": "string", "format": "uuid"},
+        "relation": {"type": "string", "enum": ["supersedes", "invalidates"]},
+        "from_artifact_id": {"type": "string", "format": "uuid"},
+        "to_artifact_id": {"type": "string", "format": "uuid"},
+        "reason": {"type": "string", "min_length": 1}
+      }
+    }
+  }
+}

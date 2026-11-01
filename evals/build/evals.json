@@ -1,0 +1,41 @@
+{
+  "skill_name": "build",
+  "evals": [
+    {
+      "id": 0,
+      "name": "build-standalone-no-tautologies",
+      "prompt": "Use pr-graph:build standalone to implement ticket ACME-104 in the fixture repo.\n\nEnvironment for this eval run (the real integrations are unavailable):\n- Do not start a pr-graph run and do not call any pr-graph coordinator, event, or artifact script. spec_audit.rb is allowed.\n- Linear is unavailable. The ticket is the JSON file under .ticket/ in the fixture repo. Do not call any Linear tool. Write the test plan from it.\n- Worktree: the fixture repo at <fixture-dir>. It is a throwaway checkout, so create the branch acme-104-vendor-status from main in place. Never modify the main branch.\n- Base: the commit the tag `base` points at.\n- Tests: bin/test runs the whole suite. There is no linter; say so and continue.\n- Subagents may be spawned as the skill directs. Scratch worktrees for mutations go under <out-dir>/scratch. Nothing outside <fixture-dir> and <out-dir> may be written.\nWhen done, write the build report to <out-dir>/build_report.json.",
+      "setup": "evals/fixtures/build_fixture.sh status-constant <fixture-dir>",
+      "expected_output": "Branch acme-104-vendor-status with reviewed commits and passing bin/test, specs written red-first for Vendor status defaults, exact with_status filtering, and rejection of unknown statuses, none that restate the STATUSES constant, and a build report whose spec_audit spec_audit.rb accepts.",
+      "assertions": [
+        "The committed acme-104-vendor-status candidate passes bin/test and the status contract, with a committed test",
+        "The committed tests contain no specs that restate Acme::Vendor::STATUSES (size, frozen, literal members)",
+        "The committed suite fails under each with_status mutant (returns-all, returns-none, no-validation)",
+        "build_report.json records a well-formed red spec_first run citing every changed test file",
+        "build_report.json carries a spec_audit of the final candidate against the base that spec_audit.rb check accepts",
+        "The transcript spawns the pg-BUILD writer and the pg-BUILD-review, pg-BUILD-simplify, and pg-VERIFY-specs lanes",
+        "Every lane spawn pins its model: pg-BUILD and pg-BUILD-simplify on sonnet, pg-BUILD-review and pg-VERIFY-specs on opus",
+        "No pr-graph run was started (no execution, artifact, or failure stream)",
+        "The main branch still points at the base tag"
+      ]
+    },
+    {
+      "id": 1,
+      "name": "build-standalone-no-mocks",
+      "prompt": "Use pr-graph:build standalone to implement ticket ACME-105 in the fixture repo.\n\nEnvironment for this eval run (the real integrations are unavailable):\n- Do not start a pr-graph run and do not call any pr-graph coordinator, event, or artifact script. spec_audit.rb is allowed.\n- Linear is unavailable. The ticket is the JSON file under .ticket/ in the fixture repo. Do not call any Linear tool. Write the test plan from it.\n- Worktree: the fixture repo at <fixture-dir>. It is a throwaway checkout, so create the branch acme-105-vendor-total-dollars from main in place. Never modify the main branch.\n- Base: the commit the tag `base` points at.\n- Tests: bin/test runs the whole suite. There is no linter; say so and continue.\n- Subagents may be spawned as the skill directs. Scratch worktrees for mutations go under <out-dir>/scratch. Nothing outside <fixture-dir> and <out-dir> may be written.\nWhen done, write the build report to <out-dir>/build_report.json.",
+      "setup": "evals/fixtures/build_fixture.sh dollars-total <fixture-dir>",
+      "expected_output": "Branch acme-105-vendor-total-dollars with reviewed commits and passing bin/test, specs written red-first that pin literal dollar strings including trailing zeros and the empty list, none that stub the list, assert the return type, or recompute the expected value, and a build report whose spec_audit spec_audit.rb accepts.",
+      "assertions": [
+        "The committed acme-105-vendor-total-dollars candidate passes bin/test and the dollars contract, with a committed test",
+        "The committed tests contain no specs that stub the subject, assert types, or compute the expected value the way the code does",
+        "The committed suite fails under each total_dollars mutant (returns-cents, no-padding, truncates)",
+        "build_report.json records a well-formed red spec_first run citing every changed test file",
+        "build_report.json carries a spec_audit of the final candidate against the base that spec_audit.rb check accepts",
+        "The transcript spawns the pg-BUILD writer and the pg-BUILD-review, pg-BUILD-simplify, and pg-VERIFY-specs lanes",
+        "Every lane spawn pins its model: pg-BUILD and pg-BUILD-simplify on sonnet, pg-BUILD-review and pg-VERIFY-specs on opus",
+        "No pr-graph run was started (no execution, artifact, or failure stream)",
+        "The main branch still points at the base tag"
+      ]
+    }
+  ]
+}

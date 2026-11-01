@@ -1,0 +1,27 @@
+{
+  "lineage_contract_version": 1,
+  "execution_contract_version": 1,
+  "artifact_contract_version": 1,
+  "invalidation": {
+    "trigger_node": "BUILD",
+    "source_family": "build_manifest"
+  },
+  "families": {
+    "triage_brief": {"candidate_dependent": false},
+    "investigation_report": {"candidate_dependent": false},
+    "implementation_plan": {"candidate_dependent": false},
+    "test_plan": {"candidate_dependent": false},
+    "worktree_manifest": {"candidate_dependent": false},
+    "repro_report": {"candidate_dependent": false},
+    "build_manifest": {"candidate_dependent": true},
+    "verification": {"candidate_dependent": true},
+    "self_review": {"candidate_dependent": true},
+    "publish_manifest": {"candidate_dependent": true},
+    "ci_result": {"candidate_dependent": true},
+    "bot_feedback": {"candidate_dependent": true},
+    "validation": {"candidate_dependent": true},
+    "browser_review": {"candidate_dependent": true},
+    "description": {"candidate_dependent": true},
+    "done_manifest": {"candidate_dependent": true}
+  }
+}

@@ -1,0 +1,32 @@
+# Secrets / env — never commit these
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials
+.aws/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Claude Code personal settings
+.claude/settings.local.json
+
+# Dependencies / build
+__pycache__/
+*.pyc
+dist/
+build/
+.venv/
+venv/
+
+
+# Logs
+*.log
+
+# The build skill's eval suite, not build output
+!evals/build/

@@ -1,0 +1,10 @@
+{
+  "outcome_coverage_version": 1,
+  "impact_statuses": ["advanced", "contradicted", "unchanged", "uncovered"],
+  "terminal_statuses": [
+    "covered",
+    "deliberately_excluded",
+    "inexpressible",
+    "explicitly_unexamined"
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "outcome_contract_version": 1,
+  "register": {
+    "required_fields": [
+      "why",
+      "actors",
+      "positive_postconditions",
+      "negative_face",
+      "declared_gaps"
+    ],
+    "actor_fields": ["id", "situation"],
+    "clause_fields": ["id", "statement"],
+    "gap_fields": ["id", "reason"],
+    "id_pattern": "\\A[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\\z",
+    "mechanism_patterns": [
+      "`[^`]+`",
+      "(?:^|[\\s(])--[a-z][a-z0-9-]*",
+      "\\b[A-Za-z0-9_/-]+\\.(?:rb|rake|js|jsx|ts|tsx|sql|yml|yaml|json)\\b",
+      "\\b[A-Z][A-Za-z0-9_]+::[A-Z][A-Za-z0-9_]+\\b",
+      "\\b(?:class|method|controller|migration|database table|database column|endpoint|GraphQL|REST API|Sidekiq|Redis|PostgreSQL|React component|Rails model)\\b"
+    ]
+  },
+  "implementation_plan": {
+    "classifications": ["CONFORM", "EXTEND", "AMEND"],
+    "step_fields": ["id", "classification", "intent", "outcome_ids", "evidence"],
+    "actual_evidence_fields": ["role", "kind", "ref", "claim"],
+    "gap_evidence_fields": ["role", "kind", "reason", "searched"],
+    "actual_evidence_kinds": ["codebase", "prior_art", "ticket", "reproduction"],
+    "roles": ["existing_pattern", "existing_mechanism", "adjacent_mechanism", "authorization", "precedent", "observed_behavior", "gap"],
+    "required_roles": {
+      "CONFORM": [],
+      "EXTEND": ["adjacent_mechanism", "authorization"],
+      "AMEND": ["existing_mechanism", "authorization"]
+    }
+  },
+  "test_plan": {
+    "coverage_fields": ["outcome_id", "status", "planned_node", "strategy", "reason"],
+    "statuses": ["planned", "uncovered"],
+    "planned_nodes": ["BUILD", "VERIFY", "SELF-REVIEW", "CI-WATCH", "BOT-FEEDBACK", "VALIDATE", "REVIEW-APP"],
+    "forbidden_witness_fields": ["artifact_id", "candidate_sha", "content_ref", "witness"]
+  }
+}

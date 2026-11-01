@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Runs every test: the scripts' shell tests and the eval graders' unit tests.
+set -uo pipefail
+cd "$(dirname "$0")/.."
+
+failed=()
+for test in tests/*_test.sh; do
+  echo "== $test"
+  bash "$test" || failed+=("$test")
+done
+for test in evals/grade_test.py evals/build/grade_test.py; do
+  echo "== $test"
+  python3 "$test" || failed+=("$test")
+done
+
+if [ "${#failed[@]}" -gt 0 ]; then
+  printf 'FAILED: %s\n' "${failed[@]}" >&2
+  exit 1
+fi
+echo "All tests passed."

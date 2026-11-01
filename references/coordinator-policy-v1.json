@@ -1,0 +1,145 @@
+{
+  "coordinator_policy_version": 1,
+  "execution_contract_version": 1,
+  "artifact_contract_version": 1,
+  "writer_node": "BUILD",
+  "nodes": {
+    "TRIAGE": {
+      "inputs": [],
+      "outputs": [{"family": "triage_brief", "candidate": "any"}],
+      "mutation_guard": false,
+      "wait_node": false,
+      "outcome_kind": null
+    },
+    "INVESTIGATE": {
+      "inputs": [{"family": "triage_brief", "candidate": "any"}],
+      "outputs": [{"family": "investigation_report", "candidate": "any"}],
+      "mutation_guard": false,
+      "wait_node": false,
+      "outcome_kind": null
+    },
+    "PLAN": {
+      "inputs": [
+        {"family": "investigation_report", "candidate": "any"},
+        {"family": "repro_report", "candidate": "any"}
+      ],
+      "outputs": [
+        {"family": "implementation_plan", "candidate": "any"},
+        {"family": "test_plan", "candidate": "any"}
+      ],
+      "mutation_guard": false,
+      "wait_node": false,
+      "outcome_kind": null
+    },
+    "WORKTREE": {
+      "inputs": [{"family": "triage_brief", "candidate": "any"}],
+      "outputs": [{"family": "worktree_manifest", "candidate": "any"}],
+      "mutation_guard": false,
+      "wait_node": false,
+      "outcome_kind": null
+    },
+    "REPRODUCE": {
+      "introduced_before": "PLAN",
+      "inputs": [
+        {"family": "investigation_report", "candidate": "any"},
+        {"family": "worktree_manifest", "candidate": "any"}
+      ],
+      "outputs": [{"family": "repro_report", "candidate": "any"}],
+      "mutation_guard": true,
+      "wait_node": false,
+      "outcome_kind": null
+    },
+    "BUILD": {
+      "inputs": [
+        {"family": "implementation_plan", "candidate": "any"},
+        {"family": "test_plan", "candidate": "any"},
+        {"family": "worktree_manifest", "candidate": "any"}
+      ],
+      "outputs": [
+        {"family": "build_manifest", "candidate": "head"},
+        {"family": "self_review", "candidate": "head"}
+      ],
+      "mutation_guard": true,
+      "wait_node": false,
+      "outcome_kind": null
+    },
+    "VERIFY": {
+      "inputs": [{"family": "build_manifest", "candidate": "current"}],
+      "outputs": [{"family": "verification", "candidate": "current"}],
+      "mutation_guard": true,
+      "wait_node": false,
+      "outcome_kind": "verify"
+    },
+    "SELF-REVIEW": {
+      "retired": true,
+      "inputs": [{"family": "verification", "candidate": "current", "pass_required": true}],
+      "outputs": [{"family": "self_review", "candidate": "current"}],
+      "mutation_guard": true,
+      "wait_node": false,
+      "outcome_kind": "self_review"
+    },
+    "PUBLISH": {
+      "inputs": [
+        {"family": "verification", "candidate": "current", "pass_required": true},
+        {"family": "self_review", "candidate": "current"}
+      ],
+      "outputs": [{"family": "publish_manifest", "candidate": "current"}],
+      "mutation_guard": true,
+      "wait_node": false,
+      "outcome_kind": null
+    },
+    "CI-WATCH": {
+      "inputs": [{"family": "publish_manifest", "candidate": "current"}],
+      "outputs": [{"family": "ci_result", "candidate": "current"}],
+      "mutation_guard": true,
+      "wait_node": true,
+      "outcome_kind": "ci"
+    },
+    "BOT-FEEDBACK": {
+      "inputs": [{"family": "publish_manifest", "candidate": "current"}],
+      "outputs": [{"family": "bot_feedback", "candidate": "current"}],
+      "mutation_guard": true,
+      "wait_node": true,
+      "outcome_kind": "bot"
+    },
+    "VALIDATE": {
+      "inputs": [{"family": "publish_manifest", "candidate": "current"}],
+      "outputs": [{"family": "validation", "candidate": "current"}],
+      "mutation_guard": true,
+      "wait_node": false,
+      "outcome_kind": "scoring"
+    },
+    "REVIEW-APP": {
+      "inputs": [{"family": "publish_manifest", "candidate": "current"}],
+      "outputs": [{"family": "browser_review", "candidate": "current"}],
+      "mutation_guard": true,
+      "wait_node": true,
+      "outcome_kind": "browser"
+    },
+    "DESC-SYNC": {
+      "inputs": [{"family": "publish_manifest", "candidate": "current"}],
+      "outputs": [{"family": "description", "candidate": "current"}],
+      "mutation_guard": true,
+      "wait_node": false,
+      "outcome_kind": null
+    },
+    "DONE": {
+      "inputs": [
+        {"family": "publish_manifest", "candidate": "current"},
+        {"family": "verification", "candidate": "current", "pass_required": true},
+        {"family": "self_review", "candidate": "current"},
+        {"family": "ci_result", "candidate": "current", "pass_required": true},
+        {"family": "bot_feedback", "candidate": "current", "pass_required": true},
+        {"family": "description", "candidate": "current"}
+      ],
+      "outputs": [{"family": "done_manifest", "candidate": "current"}],
+      "mutation_guard": true,
+      "wait_node": false,
+      "outcome_kind": null
+    }
+  },
+  "optional_done_nodes": {
+    "VALIDATE": {"artifact_family": "validation"},
+    "REVIEW-APP": {"artifact_family": "browser_review"}
+  }
+}

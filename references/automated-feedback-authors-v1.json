@@ -1,0 +1,6 @@
+{
+  "author_policy_version": 2,
+  "authors": [
+    {"id": "U_REPLACE_WITH_NODE_ID", "login": "your-automation-user", "type": "User"}
+  ]
+}
