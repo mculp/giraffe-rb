@@ -80,6 +80,8 @@ module Giraffe
       run_patch(repo, patch, "--numstat", "-z").split("\0").map { |entry| entry.split("\t", 3).last }
     end
 
+    def ignored?(repo, path) = exit_status(repo, "check-ignore", "-q", "--", path).zero?
+
     def changed_paths(repo)
       raw = run_git(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all")
       entries = raw.split("\0")

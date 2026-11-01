@@ -23,14 +23,15 @@ module PrGraph
     ].freeze
     MUTATION_RESULTS = %w[fail pass].freeze
     SPEC_PATH = %r{(\A|/)(spec|test)/.+(_spec\.rb|_test\.rb)\z|\.(spec|test)\.[jt]sx?\z}
-    SOURCE_FILE = /\.(rb|[jt]sx?|py|go|rs|java|ex|exs)\z/
+    SOURCE_FILE = /\.(rb|rake|erb|haml|slim|[cm]?[jt]sx?|vue|svelte|py|go|rs|java|kt|swift|php|ex|exs|heex)\z/
     HIDDEN_PATH = %r{(\A|/)\.}
-    # Code that exists to run tests rather than the product, beyond the specs themselves.
+    # Code that exists to run tests rather than the product, beyond the specs themselves. Only where a language's
+    # convention makes the name mean that: a model can be called lab_test.rb and a class ABTest.
     TEST_CODE = %r{
       (\A|/)(spec|tests?|__tests__)/ |
       (\A|/)(spec_helper|rails_helper|test_helper|conftest)\.\w+\z |
-      (\A|/)test_\w+\.py\z | _(test|spec)\.\w+\z | Tests?\.java\z |
-      (\A|/)config/environments/test\.rb\z | \.config\.[cm]?[jt]s\z
+      (\A|/)test_\w+\.py\z | _test\.(go|py)\z | [a-z]Tests?\.java\z |
+      (\A|/)config/environments/test\.rb\z | \A[^/]+\.config\.[cm]?[jt]s\z
     }x
 
     def self.spec_path?(path)

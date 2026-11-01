@@ -44,8 +44,9 @@ module Giraffe
 
       def save_reproduction(output)
         spec = output.fetch("regression_spec")
-        raise InvalidOutput, "regression_spec must be a file path, not a command or filter: #{spec}" if spec.match?(/[\s:]/)
+        raise InvalidOutput, "regression_spec must be a file path, not a command or filter: #{spec}" if spec.match?(%r{[\s:]|/\z})
         safe_file(worktree, spec, existing: false)
+        raise InvalidOutput, "regression_spec is gitignored, so no commit can carry it: #{spec}" if @git.ignored?(worktree, spec)
         result = run_probe(output.fetch("source"))
         unless result["exit_code"] == output["expected_exit"] && result["excerpt"].include?(output["expected_output"])
           raise InvalidOutput, "the harness could not reproduce the reported base behavior: expected exit #{output['expected_exit']} and output containing " \

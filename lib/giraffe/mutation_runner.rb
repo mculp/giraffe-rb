@@ -4,48 +4,54 @@ require_relative "errors"
 require_relative "../../scripts/spec_audit_contract"
 
 module Giraffe
-  # Proves mutations in one disposable checkout of the candidate. Every run starts from a clean copy, so a spec
-  # counts as catching a mutation only when the same command passed in the same place without it.
+  # Proves mutations of one candidate. Every run gets its own checkout, so nothing a run leaves behind reaches the
+  # next, and a spec counts as catching a mutation only when the same command passed without it.
   class MutationRunner
-    def initialize(git:, checks:, tree:, candidate:)
-      @git, @checks, @tree, @candidate = git, checks, tree, candidate
+    def initialize(git:, checks:, worktree:, candidate:, production: PrGraph::SpecAuditContract.method(:production_source?))
+      @git, @checks, @worktree, @candidate, @production = git, checks, worktree, candidate, production
       @passed = {}
     end
 
     # The command's result with the patch applied. Raises InvalidOutput for a patch that is not a real mutation
     # of production source, and BaselineFailed when the command fails without one.
     def prove(patch, command)
-      refuse_unless_production!(patch)
+      refuse_new_files!(patch)
       passes_unmutated!(command)
-      restore
-      @git.apply(@tree, patch)
-      raise InvalidOutput, "mutation changed nothing" if @git.changed_paths(@tree).empty?
-      run(command)
+      @git.at_commit(@worktree, @candidate) do |tree|
+        apply_mutation(tree, patch)
+        run(tree, command)
+      end
     end
 
     private
 
-    def refuse_unless_production!(patch)
-      tracked = @git.call(@tree, "ls-files", "-z").split("\0")
-      outside = @git.patch_paths(@tree, patch).reject { |path| tracked.include?(path) && PrGraph::SpecAuditContract.production_source?(path) }
+    # Only the patch can say: a new file somewhere ignored would not show in the applied tree.
+    def refuse_new_files!(patch)
+      tracked = @git.call(@worktree, "ls-files", "-z").split("\0")
+      refuse!(@git.patch_paths(@worktree, patch) - tracked)
+    end
+
+    # Only the applied tree can say: a rename's source is not among the paths a patch reports.
+    def apply_mutation(tree, patch)
+      @git.apply(tree, patch)
+      changed = @git.changed_paths(tree)
+      raise InvalidOutput, "mutation changed nothing" if changed.empty?
+      refuse!(changed.reject(&@production))
+    end
+
+    def refuse!(outside)
       raise InvalidOutput, "mutation must change existing production source only: #{outside.join(', ')}" if outside.any?
     end
 
     def passes_unmutated!(command)
       return if @passed[command]
-      restore
-      result = run(command)
+      result = @git.at_commit(@worktree, @candidate) { |tree| run(tree, command) }
       unless result["exit_code"].zero?
         raise BaselineFailed, "#{command.join(' ')} fails from a clean checkout with no mutation applied (exit #{result['exit_code']}): #{result['excerpt'].split.last(40).join(' ')}"
       end
       @passed[command] = true
     end
 
-    def restore
-      @git.call(@tree, "reset", "--hard", @candidate)
-      @git.call(@tree, "clean", "-fdxq")
-    end
-
-    def run(command) = @checks.run(@tree, [command]).first
+    def run(tree, command) = @checks.run(tree, [command]).first
   end
 end

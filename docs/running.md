@@ -43,14 +43,17 @@ base ref before starting. Paths below resolve relative to the configuration file
 }
 ```
 
-Commands are argument arrays. At least one executable check is mandatory. `spec_command` selects the
-spec or example named by an audit; `{spec}` and `{line}` are substitutions in those arguments, never
-shell interpolation. For a whole-file run, `{spec}:{line}` becomes just the path. For frameworks without
-line filtering, configure the command to run the named spec file. Proofs run in clean checkouts, so
-`spec_command` must work without anything a check generated or installed in the worktree; when specs need
-dependencies, make the command install them. The harness checks coverage of changed spec **files** and
-validates cited lines; exhaustive discovery of every example is not yet enforced. The model is asked to
-audit every example. A check that passes its time or output limit counts as failed, with exit 124.
+Commands are argument arrays. At least one executable check is mandatory, and so is `spec_command`, which
+selects the spec or example named by an audit. It must name `{spec}`; `{spec}` and `{line}` are
+substitutions in those arguments, never shell interpolation. For a whole-file run, `{spec}:{line}` becomes
+just the path and an argument carrying only `{line}` is dropped. For frameworks without line filtering,
+configure the command to run the named spec file. Each proof runs in its own new checkout, so
+`spec_command` must work without anything a check generated or installed in the worktree: a post-checkout
+hook's files are there, but when specs need dependencies otherwise, make the command install them. The
+harness checks coverage of changed spec **files** and validates cited lines; exhaustive discovery of every
+example is not yet enforced. The model is asked to audit every example. A check that passes its time or
+output limit counts as failed, with exit 124. Anything in a check's output that looks like a secret reaches
+state and prompts as `[REDACTED]`.
 
 On macOS, checks default to a filesystem/network sandbox with controller credentials removed from
 the environment. It permits writes in the worktree and temporary directories, so lint and builds can
@@ -100,11 +103,13 @@ and independent review within the configured round limit. A red edge from VERIFY
 fix batch carrying the failed verification, not a replay of the plan. VERIFY runs checks again, refuses any
 candidate/worktree mutation, and audits acceptance criteria without giving the auditor the plan.
 Unmet or unverifiable criteria cannot publish. Changed specs require mutations of existing production
-source; the harness runs each spec unmutated and then mutated in a disposable candidate worktree and
+source; the harness runs each spec unmutated and then mutated in disposable candidate worktrees and
 records the command result in the verification artifact. A spec that fails unmutated sends VERIFY red.
 For reproduced bugs, it executes the new regression spec on the base and candidate, requiring red then
-green; a candidate without that spec goes red too. Those proofs are executable evidence, while the model
-still judges their meaning and quality.
+green; a candidate without that spec goes red too, and one a `.gitignore` would hide is refused when
+reproducing. A regression spec that loads a file only the candidate adds is red on the base for that
+reason alone, which the harness cannot tell from the bug being red. Those proofs are executable evidence,
+while the model still judges their meaning and quality.
 
 Publishing pushes the verified clean candidate and uses GitHub's returned repository, PR identity,
 head SHA, and draft state. A compare URL is not a PR. Retries reuse a matching existing draft. Running

@@ -64,9 +64,12 @@ module Giraffe
 
       def spec_command(ref)
         path, line = ref.split(":", 2)
-        raise Error, "spec_command must be configured to run changed specs" if @run.config["spec_command"].empty?
-        # A whole-file run has no line, and "path:" is not a location a framework can load.
-        @run.config["spec_command"].map { |arg| arg.gsub("{spec}:{line}", line ? ref : path).gsub("{spec}", path).gsub("{line}", line.to_s) }
+        # A whole-file run has no line: "path:" is not a location a framework can load, and an argument
+        # that only carries the line means nothing without one.
+        @run.config["spec_command"].filter_map do |arg|
+          arg = arg.gsub("{spec}:{line}", "{spec}") unless line
+          arg.gsub("{spec}", path).gsub("{line}", line.to_s) if line || !arg.include?("{line}")
+        end
       end
 
       # The spec audit section, and beside it the full command results: the shared contract consumes its fixed
@@ -88,12 +91,10 @@ module Giraffe
       end
 
       def mutation_proofs(specs, candidate, paths)
-        @git.at_commit(worktree, candidate) do |tree|
-          runner = MutationRunner.new(git: @git, checks: @checks, tree: tree, candidate: candidate)
-          specs.map do |spec|
-            require_changed_spec_line!(spec.fetch("ref"), paths)
-            runner.prove(spec.fetch("patch"), spec_command(spec["ref"]))
-          end
+        runner = MutationRunner.new(git: @git, checks: @checks, worktree: worktree, candidate: candidate)
+        specs.map do |spec|
+          require_changed_spec_line!(spec.fetch("ref"), paths)
+          runner.prove(spec.fetch("patch"), spec_command(spec["ref"]))
         end
       end
 
@@ -118,7 +119,8 @@ module Giraffe
       end
 
       def regression_result(sha, result)
-        {"sha" => sha, "result" => result["exit_code"].zero? ? "pass" : "fail", "excerpt" => result["excerpt"].empty? ? "exit #{result['exit_code']}" : result["excerpt"]}
+        excerpt = result["excerpt"].strip.empty? ? "exit #{result['exit_code']}" : result["excerpt"]
+        {"sha" => sha, "result" => result["exit_code"].zero? ? "pass" : "fail", "excerpt" => excerpt}
       end
 
       # A proof path comes from a model's output, so a bad one is that output's fault.

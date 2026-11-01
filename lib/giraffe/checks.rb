@@ -3,6 +3,7 @@
 require "rbconfig"
 require "tmpdir"
 require_relative "command"
+require_relative "../../scripts/content_scan"
 
 module Giraffe
   class Checks
@@ -19,12 +20,19 @@ module Giraffe
       env = ENV.slice(*ENV_ALLOWED).merge("CI" => "1")
       commands.map do |argv|
         status, output = capture(@config["sandbox_checks"] ? sandbox(cwd, argv) : argv, cwd, env)
-        # A byte offset can land inside a character, which the journals could not then encode as JSON.
-        {"command" => argv, "exit_code" => status, "excerpt" => (output.byteslice(-12_000, 12_000) || output).scrub}
+        {"command" => argv, "exit_code" => status, "excerpt" => excerpt(output)}
       end
     end
 
     private
+
+    # Project code can print anything, and this goes to state and into prompts. Redacted before cutting, so a
+    # cut cannot leave part of a token behind.
+    def excerpt(output)
+      redacted = output.gsub(PrGraph::ContentScan::SECRET, "[REDACTED]")
+      # A byte offset can land inside a character, which the journals could not then encode as JSON.
+      (redacted.byteslice(-12_000, 12_000) || redacted).scrub
+    end
 
     def capture(argv, cwd, env)
       result = @command.capture(argv, cwd: cwd, env: env, clean_env: true, timeout: @config["check_timeout"])

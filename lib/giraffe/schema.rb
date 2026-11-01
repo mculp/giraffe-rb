@@ -31,7 +31,7 @@ module Giraffe
       found = []
       found << "#{path} must equal #{schema['const'].inspect}" if schema.key?("const") && value != schema["const"]
       found << "#{path} is outside its enum" if schema["enum"] && !schema["enum"].include?(value)
-      found << "#{path} must match oneOf" if schema["oneOf"] && schema["oneOf"].count { |branch| errors(branch, value, path).empty? } != 1
+      found.concat(one_of_errors(schema["oneOf"], value, path)) if schema["oneOf"]
       if value.is_a?(Hash)
         schema.fetch("required", []).each { |key| found << "#{path}.#{key} is required" unless value.key?(key) }
         properties = schema.fetch("properties", {})
@@ -53,6 +53,14 @@ module Giraffe
         found << "#{path} is above maximum" if schema["maximum"] && value > schema["maximum"]
       end
       found
+    end
+
+    # What each shape still lacks. A model asked again has to see what would make its output fit, and fewest
+    # errors would not say which shape it meant: an incomplete output is closest to the one asking questions.
+    def one_of_errors(branches, value, path)
+      outcomes = branches.map { |branch| errors(branch, value, path) }
+      return [] if outcomes.one?(&:empty?)
+      ["#{path} must match exactly one of: #{outcomes.map { |problems| problems.empty? ? 'matched' : problems.first(8).join(', ') }.join(' OR ')}"]
     end
 
     def type?(type, value)

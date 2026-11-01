@@ -52,7 +52,7 @@ module Giraffe
       %w[checks lint].each do |key|
         raise Error, "#{key} must be an array of command argument arrays" unless data[key].is_a?(Array) && data[key].all? { |argv| argv.is_a?(Array) && argv.any? && argv.all? { |v| v.is_a?(String) && !v.include?("\0") } }
       end
-      raise Error, "spec_command must be an argument array" unless data["spec_command"].is_a?(Array) && data["spec_command"].all? { |arg| arg.is_a?(String) }
+      raise Error, "spec_command must be an argument array naming {spec}" unless data["spec_command"].is_a?(Array) && data["spec_command"].all? { |arg| arg.is_a?(String) } && data["spec_command"].any? { |arg| arg.include?("{spec}") }
       raise Error, "pr_base must be a ref name" unless data["pr_base"].is_a?(String) && !data["pr_base"].empty? && !data["pr_base"].start_with?("-")
       raise Error, "at least one executable check is required" if data["checks"].empty?
       %w[check_timeout call_timeout call_budget_usd run_budget_usd].each do |key|

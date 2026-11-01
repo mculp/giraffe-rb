@@ -2,6 +2,7 @@
 
 require "digest"
 require "json"
+require_relative "call_ledger"
 require_relative "schema"
 require_relative "git"
 require_relative "../../scripts/event_log"
@@ -11,8 +12,11 @@ module Giraffe
   # before receiving its bill. Losing a result cannot silently reset the run's spend.
   class Model
     ROOT = File.expand_path("../..", __dir__)
+    Call = Data.define(:role, :attempt, :key, :schema, :cwd, :writable)
+
     def initialize(run, runner, git: Git.new)
       @run, @runner, @git = run, runner, git
+      @ledger = CallLedger.new(run)
     end
 
     # Returns the output, or with a block, what the block returns after saving or refusing it. A refused
@@ -21,18 +25,17 @@ module Giraffe
       schema = JSON.parse(File.read(File.join(ROOT, "schemas", "#{role}.json")))
       Schema.check!(schema)
       key = Digest::SHA256.hexdigest(JSON.generate([role, attempt, unit, @git.head(cwd), @run.state["answers"]]))
-      cached = ledger[key]
-      output = cached && cached["output"] || paid_call(key, {step: role, prompt: prompt(role, inputs, cached && cached["refused"]), schema: schema, cwd: cwd, writable: writable})
-      deliver(output, schema, role, attempt, key, &accept)
+      call = Call.new(role: role, attempt: attempt, key: key, schema: schema, cwd: cwd, writable: writable)
+      output = @ledger.output(key) || paid_call(call, prompt(role, inputs, @ledger.refusal(key)))
+      deliver(output, call, &accept)
     end
 
     private
 
-    def ledger = @run.state.fetch("runtime").fetch("calls", {})
-
-    def billable?(cost) = cost.is_a?(Numeric) && cost.finite? && cost >= 0
-
-    def record(key, value) = @run.checkpoint_entry("calls", key, value)
+    def billable?(usage)
+      cost = usage && usage["cost_usd"]
+      cost.is_a?(Numeric) && cost.finite? && cost >= 0
+    end
 
     def prompt(role, inputs, refusal)
       profiles = @run.config["profiles"].fetch("instructions", []) + @run.config["profiles"].fetch(role, [])
@@ -42,52 +45,49 @@ module Giraffe
     end
 
     def budget
-      available = @run.config["run_budget_usd"] - ledger.values.sum { |entry| entry.fetch("charge", 0.0) }
+      available = @run.config["run_budget_usd"] - @ledger.spent
       raise Error, "run budget exhausted; unresolved calls retain their reserved cost" unless available > 0.001
       [@run.config["call_budget_usd"], available].min
     end
 
-    def paid_call(key, request)
-      role = request.fetch(:step)
+    def paid_call(call, prompt)
       limit = budget
       # A new entry is used on retries, retaining any previous unknown charge.
-      reservation = "#{key}:#{SecureRandom.uuid}"
-      before = @git.fingerprint(request.fetch(:cwd))
-      record(reservation, {"role" => role, "charge" => limit, "state" => "started"})
-      result = @runner.call(**request, budget_usd: limit)
-      guard_repository!(request, before)
+      reservation = "#{call.key}:#{SecureRandom.uuid}"
+      before = @git.fingerprint(call.cwd)
+      @ledger.reserve(reservation, call.role, limit)
+      result = @runner.call(step: call.role, prompt: prompt, schema: call.schema, cwd: call.cwd, writable: call.writable, budget_usd: limit)
+      guard_repository!(call, before)
       usage = result.fetch("usage")
-      raise InvalidOutput, "runner returned an invalid cost" unless billable?(usage.fetch("cost_usd"))
+      raise InvalidOutput, "runner returned an invalid cost" unless billable?(usage)
       # Billed before validating: an invalid result still cost what it reported.
-      record(reservation, {"role" => role, "charge" => usage["cost_usd"], "state" => "finished", "usage" => usage})
+      @ledger.bill(reservation, call.role, "finished", usage)
       result.fetch("output")
     rescue Error => error
-      usage = error.usage
-      record(reservation, {"role" => role, "charge" => usage["cost_usd"], "state" => "failed", "usage" => usage}) if reservation && usage && billable?(usage["cost_usd"])
+      @ledger.bill(reservation, call.role, "failed", error.usage) if reservation && billable?(error.usage)
       raise
     end
 
-    def guard_repository!(request, before)
-      cwd = request.fetch(:cwd)
-      return @git.unchanged!(cwd, before) unless request.fetch(:writable)
+    def guard_repository!(call, before)
+      return @git.unchanged!(call.cwd, before) unless call.writable
       fields = %w[head branch common_git_dir origin push_origin]
-      raise Error, "writer changed repository identity or committed outside the harness" unless before.slice(*fields) == @git.fingerprint(cwd).slice(*fields)
+      raise Error, "writer changed repository identity or committed outside the harness" unless before.slice(*fields) == @git.fingerprint(call.cwd).slice(*fields)
     end
 
-    def deliver(output, schema, role, attempt, key)
-      Schema.validate!(schema, output)
-      record(key, {"role" => role, "charge" => 0.0, "output" => output}) unless ledger.dig(key, "output")
-      questions!(output, role, attempt, key)
+    def deliver(output, call)
+      Schema.validate!(call.schema, output)
+      @ledger.keep(call.key, call.role, output) unless @ledger.output(call.key)
+      questions!(output, call)
       block_given? ? yield(output) : output
     rescue InvalidOutput, PrGraph::ContentError => error
-      record(key, {"role" => role, "charge" => 0.0, "refused" => error.message})
+      @ledger.refuse(call.key, call.role, error.message)
       raise
     end
 
-    def questions!(output, role, attempt, key)
+    def questions!(output, call)
       return if output.fetch("questions").empty?
       questions = output["questions"].each_with_index.map do |text, i|
-        {"id" => "#{key[0, 12]}-#{i + 1}", "text" => text, "role" => role, "attempt_id" => attempt}
+        {"id" => "#{call.key[0, 12]}-#{i + 1}", "text" => text, "role" => call.role, "attempt_id" => call.attempt}
       end
       @run.update(status: "waiting_for_answers", questions: questions)
       raise Parked, "waiting for a person's answer"
