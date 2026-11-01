@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative "command"
 require_relative "errors"
 require_relative "../../scripts/spec_audit_contract"
 
@@ -16,7 +17,7 @@ module Giraffe
     # of production source, and BaselineFailed when the command fails without one.
     def prove(patch, command)
       refuse_new_files!(patch)
-      passes_unmutated!(command)
+      @passed[command] ||= passes_unmutated!(command)
       @git.at_commit(@worktree, @candidate) do |tree|
         apply_mutation(tree, patch)
         run(tree, command)
@@ -26,15 +27,14 @@ module Giraffe
     private
 
     # Only the patch can say: a new file somewhere ignored would not show in the applied tree.
-    def refuse_new_files!(patch)
-      tracked = @git.call(@worktree, "ls-files", "-z").split("\0")
-      refuse!(@git.patch_paths(@worktree, patch) - tracked)
-    end
+    def refuse_new_files!(patch) = refuse!(@git.patch_paths(@worktree, patch) - @git.tracked_paths(@worktree))
 
-    # Only the applied tree can say: a rename's source is not among the paths a patch reports.
+    # Only the applied tree can say: a rename's source is not among the paths a patch reports. What a checkout's
+    # hook had already changed is neither the mutation's doing nor proof of one.
     def apply_mutation(tree, patch)
+      left_by_checkout = @git.changed_paths(tree)
       @git.apply(tree, patch)
-      changed = @git.changed_paths(tree)
+      changed = @git.changed_paths(tree) - left_by_checkout
       raise InvalidOutput, "mutation changed nothing" if changed.empty?
       refuse!(changed.reject(&@production))
     end
@@ -44,12 +44,10 @@ module Giraffe
     end
 
     def passes_unmutated!(command)
-      return if @passed[command]
       result = @git.at_commit(@worktree, @candidate) { |tree| run(tree, command) }
-      unless result["exit_code"].zero?
-        raise BaselineFailed, "#{command.join(' ')} fails from a clean checkout with no mutation applied (exit #{result['exit_code']}): #{result['excerpt'].split.last(40).join(' ')}"
-      end
-      @passed[command] = true
+      return true if result["exit_code"].zero?
+      raise BaselineFailed, "#{command.join(' ')} fails from a clean checkout with no mutation applied " \
+                            "(exit #{result['exit_code']}): #{Command.tail(result['excerpt'])}"
     end
 
     def run(tree, command) = @checks.run(tree, [command]).first

@@ -46,11 +46,27 @@ base ref before starting. Paths below resolve relative to the configuration file
 Commands are argument arrays. At least one executable check is mandatory, and so is `spec_command`, which
 selects the spec or example named by an audit. It must name `{spec}`; `{spec}` and `{line}` are
 substitutions in those arguments, never shell interpolation. For a whole-file run, `{spec}:{line}` becomes
-just the path and an argument carrying only `{line}` is dropped. For frameworks without line filtering,
-configure the command to run the named spec file. Each proof runs in its own new checkout, so
-`spec_command` must work without anything a check generated or installed in the worktree: a post-checkout
-hook's files are there, but when specs need dependencies otherwise, make the command install them. The
-harness checks coverage of changed spec **files** and validates cited lines; exhaustive discovery of every
+just the path, an argument carrying `{line}` without `{spec}` is dropped, and one carrying both keeps the
+spec with an empty line. A flag and its value as two arguments, `--line {line}`, is refused: a whole-file
+run could only drop half of it, so write `--line={line}`. For frameworks without line filtering, configure
+the command to run the named spec file. Each proof runs in its own new checkout, so `spec_command` must
+work without anything a check generated or installed in the worktree: a post-checkout hook's files are
+there, but when specs need dependencies otherwise, make the command install them.
+
+That hook runs on every checkout, on the checked-out commit's files and outside the check sandbox, so keep
+it to what you would run on unreviewed code. It gets 600 seconds and the same reduced environment as a
+check, so it reads any credentials it needs from its own files. If it fails, the run pauses with the hook's
+error and resuming tries again; a worktree the run never finished making is removed and made again, so BUILD
+cannot be paid to work in one that lacks what the hook provides. BUILD may not edit `.husky` or a
+`core.hooksPath` inside the tree, though a hook calling other project files will run BUILD's versions of
+them. Harness commits and pushes run no hooks.
+
+A changed file counts as a spec, and owes a mutation audit, by each language's naming convention: `*_spec.rb`;
+`*_test.rb` and `test_*.rb` under `test/` or `tests/`; `*.test.*`, `*.spec.*`, `*_test.*`, `*.cy.*` and anything
+in `__tests__/` for JavaScript and TypeScript; `*_test.go`, `*_test.py`, `test_*.py`, `*_test.exs`; `FooTest` or
+`FooTests` for Java, Kotlin, PHP and Swift; and top-level files in Rust's `tests/`. A spec named anything else
+is not audited. There is one `spec_command`, so a repository with specs in two languages needs one that
+dispatches on the file. The harness checks coverage of changed spec **files** and validates cited lines; exhaustive discovery of every
 example is not yet enforced. The model is asked to audit every example. A check that passes its time or
 output limit counts as failed, with exit 124. Anything in a check's output that looks like a secret reaches
 state and prompts as `[REDACTED]`.
@@ -96,18 +112,21 @@ its checkpoint. A lost model result retains its full budget reservation. A known
 structured result records its reported cost. A malformed response or lost process retains the
 reservation conservatively. An invalid output, or one the contracts refuse, such as a plan or a mutation
 patch, stays billed and pauses the run; `resume` asks again with the refusal in the prompt. No automatic
-invalid-output retry is currently attempted.
+invalid-output retry is currently attempted. Outputs of finished attempts leave the state, whose cap is 1 MB;
+a single attempt's outputs past that are refused the same way. A diff past 2 MB reaches a model as a summary of
+changed files, which it can read for itself.
 
 BUILD runs each plan assignment in a fresh context, commits its files, then repeats executable checks
 and independent review within the configured round limit. A red edge from VERIFY re-enters BUILD as one
 fix batch carrying the failed verification, not a replay of the plan. VERIFY runs checks again, refuses any
 candidate/worktree mutation, and audits acceptance criteria without giving the auditor the plan.
 Unmet or unverifiable criteria cannot publish. Changed specs require mutations of existing production
-source; the harness runs each spec unmutated and then mutated in disposable candidate worktrees and
+source or view files, never data or config files such as YAML, or scripts with no extension; the harness runs each spec unmutated and then mutated in disposable candidate worktrees and
 records the command result in the verification artifact. A spec that fails unmutated sends VERIFY red.
 For reproduced bugs, it executes the new regression spec on the base and candidate, requiring red then
 green; a candidate without that spec goes red too, and one a `.gitignore` would hide is refused when
-reproducing. A regression spec that loads a file only the candidate adds is red on the base for that
+reproducing. A spec a clean checkout cannot run, for want of dependencies only the worktree has, also goes red;
+BUILD can ask a question about that, and if it recurs the stop message carries the reason. A regression spec that loads a file only the candidate adds is red on the base for that
 reason alone, which the harness cannot tell from the bug being red. Those proofs are executable evidence,
 while the model still judges their meaning and quality.
 

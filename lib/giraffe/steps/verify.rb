@@ -25,7 +25,8 @@ module Giraffe
 
       def finish_verification(content)
         if content["failures"].positive?
-          checkpoint("verification_feedback", content)
+          # Without the raw proofs: their outcomes are in spec_audit, and a proof per example can outgrow the state.
+          checkpoint("verification_feedback", content.except("mutation_proofs"))
           # Per attempt: a fix batch can leave the candidate alone, and that red still counts toward the recurrence stop.
           @run.coordinator.fail(@node, @attempt, reason: content.fetch("reason"), failure_id: "verification", revision: "#{content.fetch('candidate_sha')}:#{@attempt}")
         else
@@ -64,12 +65,14 @@ module Giraffe
 
       def spec_command(ref)
         path, line = ref.split(":", 2)
-        # A whole-file run has no line: "path:" is not a location a framework can load, and an argument
-        # that only carries the line means nothing without one.
-        @run.config["spec_command"].filter_map do |arg|
-          arg = arg.gsub("{spec}:{line}", "{spec}") unless line
-          arg.gsub("{spec}", path).gsub("{line}", line.to_s) if line || !arg.include?("{line}")
-        end
+        arguments = line ? @run.config["spec_command"] : whole_file_arguments
+        arguments.map { |arg| arg.gsub("{spec}", path).gsub("{line}", line.to_s) }
+      end
+
+      # "path:" is not a location a framework can load, and an argument carrying only the line means nothing.
+      def whole_file_arguments
+        arguments = @run.config["spec_command"].map { |arg| arg.gsub("{spec}:{line}", "{spec}") }
+        arguments.reject { |arg| arg.include?("{line}") && !arg.include?("{spec}") }
       end
 
       # The spec audit section, and beside it the full command results: the shared contract consumes its fixed

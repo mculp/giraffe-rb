@@ -26,6 +26,7 @@ module Giraffe
 
     def initialize(data, relative_to: Dir.pwd, resolved: false)
       @data = data.dup
+      @resolved = resolved
       unless resolved
         %w[repo runs_dir].each do |key|
           @data[key] = File.expand_path(@data.fetch(key, key == "runs_dir" ? ".giraffe/runs" : "."), relative_to)
@@ -52,7 +53,7 @@ module Giraffe
       %w[checks lint].each do |key|
         raise Error, "#{key} must be an array of command argument arrays" unless data[key].is_a?(Array) && data[key].all? { |argv| argv.is_a?(Array) && argv.any? && argv.all? { |v| v.is_a?(String) && !v.include?("\0") } }
       end
-      raise Error, "spec_command must be an argument array naming {spec}" unless data["spec_command"].is_a?(Array) && data["spec_command"].all? { |arg| arg.is_a?(String) } && data["spec_command"].any? { |arg| arg.include?("{spec}") }
+      validate_spec_command!(data["spec_command"]) unless @resolved
       raise Error, "pr_base must be a ref name" unless data["pr_base"].is_a?(String) && !data["pr_base"].empty? && !data["pr_base"].start_with?("-")
       raise Error, "at least one executable check is required" if data["checks"].empty?
       %w[check_timeout call_timeout call_budget_usd run_budget_usd].each do |key|
@@ -63,6 +64,12 @@ module Giraffe
       end
       raise Error, "runner must be claude or scripted" unless %w[claude scripted].include?(data["runner"])
       %w[dry_run sandbox_checks].each { |key| raise Error, "#{key} must be boolean" unless [true, false].include?(data[key]) }
+    end
+
+    # Only when a run starts: one already under way keeps what it was started with, and stays readable.
+    def validate_spec_command!(command)
+      raise Error, "spec_command must be an argument array naming {spec}" unless command.is_a?(Array) && command.all?(String) && command.any? { |arg| arg.include?("{spec}") }
+      raise Error, "spec_command must pass the line as --flag={line}, which a whole-file run can drop" if command.each_cons(2).any? { |flag, value| flag.start_with?("-") && value == "{line}" }
     end
 
     def load_profiles(root)

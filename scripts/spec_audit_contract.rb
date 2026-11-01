@@ -22,16 +22,23 @@ module PrGraph
       passes_without_change
     ].freeze
     MUTATION_RESULTS = %w[fail pass].freeze
-    SPEC_PATH = %r{(\A|/)(spec|test)/.+(_spec\.rb|_test\.rb)\z|\.(spec|test)\.[jt]sx?\z}
-    SOURCE_FILE = /\.(rb|rake|erb|haml|slim|[cm]?[jt]sx?|vue|svelte|py|go|rs|java|kt|swift|php|ex|exs|heex)\z/
+    # Each language's naming conventions for a test. A changed file named nothing like these owes no audit, so a
+    # convention missing here is a spec nobody proves.
+    SPEC_PATH = Regexp.union(
+      /_spec\.rb\z/, %r{(\A|/)(spec|tests?)/(.+/)?(\w+_test|test_\w+)\.rb\z},
+      /[._](spec|test|cy)\.[cm]?[jt]sx?\z/, %r{(\A|/)__tests__/.+\.[cm]?[jt]sx?\z},
+      /_test\.(go|py|exs)\z/, %r{(\A|/)test_\w+\.py\z},
+      /[a-z]Tests?\.(java|kt|php|swift)\z/, %r{(\A|/)[Tt]ests?/(.+/)?\w*Tests?\.(java|kt|php|swift)\z},
+      %r{(\A|/)tests/[^/]+\.rs\z}
+    )
+    SOURCE_FILE = /\.(rb|rake|erb|haml|slim|jbuilder|rabl|builder|html|ejs|hbs|liquid|sh|[cm]?[jt]sx?|vue|svelte|py|go|rs|java|kt|swift|php|ex|exs|heex)\z/
     HIDDEN_PATH = %r{(\A|/)\.}
-    # Code that exists to run tests rather than the product, beyond the specs themselves. Only where a language's
-    # convention makes the name mean that: a model can be called lab_test.rb and a class ABTest.
+    # Code that exists to run tests rather than the product, beyond the specs themselves.
     TEST_CODE = %r{
-      (\A|/)(spec|tests?|__tests__)/ |
+      (\A|/)(spec|[Tt]ests?|__tests__)/ |
       (\A|/)(spec_helper|rails_helper|test_helper|conftest)\.\w+\z |
-      (\A|/)test_\w+\.py\z | _test\.(go|py)\z | [a-z]Tests?\.java\z |
-      (\A|/)config/environments/test\.rb\z | \A[^/]+\.config\.[cm]?[jt]s\z
+      (\A|/)config/environments/test\.rb\z |
+      (\A|/)(jest|vitest|karma|mocha|cypress|playwright)\.config\.[cm]?[jt]s\z | \A[^/]+\.config\.[cm]?[jt]s\z
     }x
 
     def self.spec_path?(path)

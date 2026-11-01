@@ -10,11 +10,22 @@ module Giraffe
     LIMIT = 2_000_000
     # The environment any child may inherit; a caller adds what its own child needs.
     BASE_ENV = %w[PATH HOME TMPDIR LANG LC_ALL USER].freeze
+    # What project code may inherit: never a controller, model, GitHub, Linear or Temper credential.
+    PROJECT_ENV = [*BASE_ENV, "SHELL", "GEM_HOME", "GEM_PATH", "BUNDLE_PATH"].freeze
+    TAIL_CHARS = 1_000
+
+    # The end of some output, for a reason that has to stay short. Its line breaks stay: joining lines could
+    # make a secret pattern out of text that redaction had no reason to touch.
+    def self.tail(output)
+      text = output.strip
+      text[-TAIL_CHARS..] || text
+    end
+
     def initialize(cancelled: -> { false })
       @cancelled = cancelled
     end
 
-    def capture(argv, cwd:, env: {}, timeout: 600, input: nil, clean_env: false)
+    def capture(argv, cwd:, env: {}, timeout: 600, input: nil, clean_env: false, limit: LIMIT)
       raise Error, "command must be a nonempty argument array" unless argv.is_a?(Array) && argv.any? && argv.all? { |part| part.is_a?(String) }
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       output = error = status = nil
@@ -25,8 +36,8 @@ module Giraffe
             data = +""
             while (chunk = stream.read(16_384))
               data << chunk
-              if data.bytesize > LIMIT
-                raise CommandLimit, "command output exceeds #{LIMIT} bytes"
+              if data.bytesize > limit
+                raise CommandLimit, "#{argv.first(2).join(' ')} output exceeds #{limit} bytes"
               end
             end
             data
@@ -45,7 +56,7 @@ module Giraffe
         begin
           loop do
             raise Cancelled, "run cancelled" if @cancelled.call
-            raise CommandLimit, "command timed out after #{timeout}s" if Process.clock_gettime(Process::CLOCK_MONOTONIC) - started > timeout
+            raise CommandLimit, "#{argv.first(2).join(' ')} timed out after #{timeout}s" if Process.clock_gettime(Process::CLOCK_MONOTONIC) - started > timeout
             readers.each { |thread| thread.value unless thread.alive? }
             pending = [waiter, *readers, writer].find(&:alive?)
             break unless pending
@@ -66,7 +77,7 @@ module Giraffe
 
     def run!(argv, **options)
       result = capture(argv, **options)
-      raise Error, "#{argv.first} failed (#{result['status']}): #{result['stderr'].lines.first.to_s.strip}" unless result["status"].zero?
+      raise Error, "#{argv.first} failed (#{result['status']}): #{self.class.tail(result['stderr'])}" unless result["status"].zero?
       result.fetch("stdout")
     end
   end

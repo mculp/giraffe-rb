@@ -57,6 +57,7 @@ module Giraffe
           attempt = open || @run.coordinator.start(node, worktree: protected?(node) ? worktree : nil)
           @attempt = attempt.fetch("attempt_id")
           @node = node
+          @model.begin_attempt(@attempt)
           send("step_#{node.downcase}")
           # Also moves the revision on, so this boundary's checkpoint is the one hydrate and restore pick.
           checkpoint("last_step", node)
@@ -67,7 +68,7 @@ module Giraffe
       rescue Cancelled => error
         @run.update(status: "cancelled", error: error.message)
       rescue StandardError => error
-        @run.update(status: "paused", error: error.message)
+        @run.update(status: "paused", error: PrGraph::ContentScan.redact(error.message))
         @run.sync
         raise
       end
@@ -120,7 +121,9 @@ module Giraffe
     def finish(**options) = @run.coordinator.complete(@node, @attempt, **options)
 
     def ask(role, inputs, cwd: worktree, writable: false, unit: "main", &accept)
-      @model.call(role, attempt: @attempt, inputs: {"ticket" => @run.state["ticket"]}.merge(inputs), cwd: cwd, writable: writable, unit: unit, &accept)
+      request = Model::Request.new(role: role, attempt: @attempt, unit: unit, cwd: cwd, writable: writable,
+                                   inputs: {"ticket" => @run.state["ticket"]}.merge(inputs))
+      @model.call(request, &accept)
     end
 
     # The graph after finishing any result a crash left half recorded.

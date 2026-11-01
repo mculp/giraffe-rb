@@ -3,6 +3,8 @@
 module Giraffe
   module Steps
     module Build
+      PROTECTED = %r{(^|/)(\.git|\.claude|\.cursor|\.giraffe|\.husky|\.env(?:\..*)?|credentials)(/|$)|(^|/)(CLAUDE|AGENTS)\.md$|\.(pem|key)$}
+
       def step_build
         @git.clean!(worktree)
         if attempted_artifact("build_manifest") && attempted_artifact("self_review")
@@ -31,10 +33,11 @@ module Giraffe
           blocking = review.fetch("findings").select { |finding| finding["severity"] == "blocking" }
           if blocking.empty? && checks.all? { |check| check["exit_code"].zero? }
             raise Error, "BUILD produced no change from the base" if candidate == base_sha
-            put("build_manifest", {"candidate_sha" => candidate, "base_sha" => base_sha,
-                                   "steps" => units.map { |unit| unit["id"] }, "checks" => checks}, candidate: candidate, covered: clause_ids)
+            # The review first: resuming asks for it again word for word, but checks rarely print the same twice.
             put("self_review", {"candidate_sha" => candidate, "reviews" => reviews}, candidate: candidate,
                 perspective: "independent_review", covered: clause_ids)
+            put("build_manifest", {"candidate_sha" => candidate, "base_sha" => base_sha,
+                                   "steps" => units.map { |unit| unit["id"] }, "checks" => checks}, candidate: candidate, covered: clause_ids)
             finish
             return
           end
@@ -64,8 +67,8 @@ module Giraffe
       end
 
       def guard_changed_paths!
-        paths = @git.changed_paths(worktree)
-        forbidden = paths.select { |path| path.match?(%r{(^|/)(\.git|\.claude|\.cursor|\.giraffe|\.env(?:\..*)?|credentials)(/|$)|(^|/)(CLAUDE|AGENTS)\.md$|\.(pem|key)$}) }
+        hooks = @git.hooks_prefix(worktree)
+        forbidden = @git.changed_paths(worktree).select { |path| path.match?(PROTECTED) || (hooks && path.start_with?(hooks)) }
         raise Error, "BUILD changed protected files: #{forbidden.join(', ')}" if forbidden.any?
       end
     end

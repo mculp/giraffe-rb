@@ -1012,7 +1012,9 @@ module PrGraph
     def recurring_failure_stop(state)
       return unless state.dig("failure_queue", "stopped")
 
-      "run stopped by recurring failure(s): #{state.dig('failure_queue', 'stops').map { |stop| stop['failure_id'] }.uniq.join(', ')}"
+      stops = state.dig("failure_queue", "stops")
+      last = state.dig("failure_queue", "findings").find { |finding| finding["occurrence_id"] == stops.last["triggering_occurrence_id"] }
+      "run stopped by recurring failure(s): #{stops.map { |stop| stop['failure_id'] }.uniq.join(', ')}; last reason: #{last['reason']}"
     end
 
     def validate_plan(implementation, test_plan, state)

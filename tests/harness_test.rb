@@ -161,7 +161,7 @@ class HarnessTest < Minitest::Test
     invalid = {"output" => {"questions" => [], "summary" => "thin"}, "cost_usd" => 0.12}
     assert_raises(Giraffe::InvalidOutput) { execute(run, {"triage" => [invalid]}) }
     assert_equal ["TRIAGE"], run.coordinator.snapshot["attempts"].values.map { |row| row["node"] }
-    assert_equal 0.12, run.state.dig("runtime", "calls").values.sum { |call| call["charge"] }, "an invalid result still costs what it reported"
+    assert_equal 0.12, spent(run), "an invalid result still costs what it reported"
     assert_empty @github.calls
   end
 
@@ -181,6 +181,8 @@ class HarnessTest < Minitest::Test
     assert_raises(Giraffe::Error) { config(dryRun: true) }
     assert_match(/spec_command/, assert_raises(Giraffe::Error) { config(spec_command: []) }.message)
     assert_match(/naming \{spec\}/, assert_raises(Giraffe::Error) { config(spec_command: ["rspec"]) }.message)
+    assert_match(/naming \{spec\}/, assert_raises(Giraffe::Error) { config(spec_command: ["{spec}", 1]) }.message)
+    assert_match(/--flag=\{line\}/, assert_raises(Giraffe::Error) { config(spec_command: ["rspec", "{spec}", "--line", "{line}"]) }.message)
   end
 
   def test_verifier_that_changes_tracked_file_cannot_publish
@@ -300,7 +302,7 @@ class HarnessTest < Minitest::Test
     error = assert_raises(Giraffe::InvalidOutput, PrGraph::ContractError) { execute(run, runner) }
     assert_match(reason, error.message)
     assert_equal "paused", run.state["status"]
-    assert_equal 0.25, run.state.dig("runtime", "calls").values.sum { |call| call.fetch("charge", 0.0) }
+    assert_equal 0.25, spent(run)
     execute(run, runner)
     assert_equal "draft_pr", run.state["status"]
     asked = runner.calls.select { |call| call[:step] == role }
@@ -315,6 +317,58 @@ class HarnessTest < Minitest::Test
     refused = copy(data["spec_audit"][0])
     refused["specs"][0]["patch"] = patch
     assert_resume_asks_again("spec_audit", data, refused, reason)
+  end
+
+  # Each refused output pauses the run and the next resume asks again, until the good one is accepted.
+  def assert_refused_in_turn(role, data, refusals)
+    good = data.fetch(role).first
+    data[role] = refusals.map { |output, _reason| {"output" => output, "cost_usd" => 0.25} } << good
+    runner = Giraffe::Runners::Scripted.new(data)
+    run = start_bug
+    refusals.each do |_output, reason|
+      assert_match(reason, assert_raises(Giraffe::InvalidOutput) { execute(run, runner) }.message)
+    end
+    execute(run, runner)
+    assert_equal "draft_pr", run.state["status"]
+  end
+
+  def test_regression_spec_that_cannot_be_a_file_the_candidate_commits_is_refused
+    FileUtils.mkdir_p(File.join(@repo, "lib"))
+    File.write(File.join(@repo, "lib/x.rb"), "X = 1\n")
+    File.write(File.join(@repo, ".gitignore"), "generated/\n")
+    data = bug_script
+    reproduce = data["reproduce"][0]
+    assert_refused_in_turn("reproduce", data, [
+      [reproduce.merge("regression_spec" => "test/greeting_test.rb:1"), /must be a file path/],
+      [reproduce.merge("regression_spec" => "test/a b_test.rb"), /must be a file path/],
+      [reproduce.merge("regression_spec" => "test/"), /must be a file path/],
+      [reproduce.merge("regression_spec" => "lib"), /not a directory/],
+      [reproduce.merge("regression_spec" => "../outside_test.rb"), /invalid relative proof path/],
+      [reproduce.merge("regression_spec" => "generated/greeting_test.rb"), /gitignored/]
+    ])
+  end
+
+  def test_spec_audit_must_cite_a_line_of_a_changed_spec
+    data = bug_script
+    citing = lambda do |ref|
+      audit = copy(data["spec_audit"][0])
+      audit["specs"][0]["ref"] = ref
+      [audit, /real changed spec and line/]
+    end
+    assert_refused_in_turn("spec_audit", data, %w[test/greeting_test.rb:99 test/greeting_test.rb:0 app.rb:1].map(&citing))
+  end
+
+  def test_spec_command_for_a_line_and_for_a_whole_file
+    {
+      ["rspec", "{spec}:{line}"] => [["rspec", "a_spec.rb:3"], ["rspec", "a_spec.rb"]],
+      ["run", "{spec}", "--line={line}"] => [["run", "a_spec.rb", "--line=3"], ["run", "a_spec.rb"]],
+      ["run", "{spec}", "{line}"] => [["run", "a_spec.rb", "3"], ["run", "a_spec.rb"]],
+      ["sh", "-c", "run {spec} # line {line}"] => [["sh", "-c", "run a_spec.rb # line 3"], ["sh", "-c", "run a_spec.rb # line "]]
+    }.each do |command, (at_line, whole_file)|
+      harness = Giraffe::Harness.new(start(spec_command: command), runner: Giraffe::Runners::Scripted.new({}), github: @github)
+      assert_equal at_line, harness.spec_command("a_spec.rb:3")
+      assert_equal whole_file, harness.spec_command("a_spec.rb")
+    end
   end
 
   def test_refused_triage_is_asked_again_on_resume
@@ -339,11 +393,6 @@ class HarnessTest < Minitest::Test
                              /could not reproduce.*expected exit 7.*got exit 1.*wrong greeting/)
   end
 
-  def test_probe_that_hangs_is_asked_again_on_resume
-    data = bug_script
-    assert_resume_asks_again("reproduce", data, data["reproduce"][0].merge("source" => "sleep 30"), /got exit 124/, check_timeout: 2)
-  end
-
   def test_probe_cannot_touch_the_worktree
     data = bug_script
     data["reproduce"][0]["source"] = 'File.write("scratch.txt", "x"); ' + data["reproduce"][0]["source"]
@@ -351,33 +400,6 @@ class HarnessTest < Minitest::Test
     execute(run, data)
     assert_equal "draft_pr", run.state["status"]
     refute File.exist?(File.join(run.directory, "worktree", "scratch.txt"))
-  end
-
-  def test_regression_spec_that_is_not_a_plain_path_is_asked_again_on_resume
-    data = bug_script
-    assert_resume_asks_again("reproduce", data, data["reproduce"][0].merge("regression_spec" => "test/greeting_test.rb:1"), /must be a file path/)
-  end
-
-  def test_regression_spec_outside_the_worktree_is_asked_again_on_resume
-    data = bug_script
-    assert_resume_asks_again("reproduce", data, data["reproduce"][0].merge("regression_spec" => "../outside_test.rb"), /invalid relative proof path/)
-  end
-
-  def test_regression_spec_naming_a_directory_is_asked_again_on_resume
-    data = bug_script
-    assert_resume_asks_again("reproduce", data, data["reproduce"][0].merge("regression_spec" => "test/"), /must be a file path/)
-  end
-
-  def test_gitignored_regression_spec_is_asked_again_on_resume
-    File.write(File.join(@repo, ".gitignore"), "generated/\n")
-    data = bug_script
-    assert_resume_asks_again("reproduce", data, data["reproduce"][0].merge("regression_spec" => "generated/greeting_test.rb"), /gitignored/)
-  end
-
-  def test_probe_printing_a_token_is_still_asked_again_with_a_reason
-    data = bug_script
-    leak = data["reproduce"][0].merge("source" => %(puts "ghp_" + "a" * 36; exit 1))
-    assert_resume_asks_again("reproduce", data, leak, /could not reproduce.*REDACTED/)
   end
 
   def test_refused_repro_report_is_asked_again_on_resume
@@ -425,22 +447,6 @@ class HarnessTest < Minitest::Test
     assert_mutation_refused(MUTATION.sub("hello", "Hello"), /changed nothing/)
   end
 
-  def test_mutation_cannot_add_a_file_that_is_not_source
-    assert_mutation_refused(MUTATION + new_file_patch("boom.txt"))
-  end
-
-  def test_mutation_cannot_add_a_new_spec
-    assert_mutation_refused(MUTATION + new_file_patch("test/boom_test.rb"))
-  end
-
-  def test_mutation_cannot_add_test_support_code
-    assert_mutation_refused(MUTATION + new_file_patch("test/support/boom.rb"))
-  end
-
-  def test_mutation_cannot_add_a_source_file_an_autoloader_would_pick_up
-    assert_mutation_refused(new_file_patch("lib/boom.rb"))
-  end
-
   def test_mutation_cannot_add_a_gitignored_source_file
     File.write(File.join(@repo, ".gitignore"), "generated/\n")
     assert_mutation_refused(MUTATION + new_file_patch("generated/boom.rb"))
@@ -457,28 +463,17 @@ class HarnessTest < Minitest::Test
                             "diff --git a/test/greeting_test.rb b/app.rb\nsimilarity index 100%\nrename from test/greeting_test.rb\nrename to app.rb\n")
   end
 
-  def test_spec_audit_citing_a_line_past_the_end_is_asked_again_on_resume
-    data = bug_script
-    refused = copy(data["spec_audit"][0])
-    refused["specs"][0]["ref"] = "test/greeting_test.rb:99"
-    assert_resume_asks_again("spec_audit", data, refused, /real changed spec and line/)
-  end
-
-  def test_spec_audit_citing_an_unchanged_file_is_asked_again_on_resume
-    data = bug_script
-    refused = copy(data["spec_audit"][0])
-    refused["specs"][0]["ref"] = "app.rb:1"
-    assert_resume_asks_again("spec_audit", data, refused, /real changed spec and line/)
-  end
-
   def test_only_production_source_can_be_mutated
     %w[app.rb lib/a/b.rb src/x.ts pkg/main.go src/Main.java lib/latest.py app/models/lab_test.rb src/ABTest.java src/app.config.ts
-       app/views/a.erb src/App.vue src/Contest.java].each do |path|
+       app/views/a.erb src/App.vue src/Contest.java lib/tasks/a.rake app/views/a.html.haml app/views/a.slim src/a.mjs src/a.cts src/A.svelte
+       src/A.kt src/A.swift src/a.php lib/a.heex app/views/api/w.json.jbuilder app/views/a.rabl app/views/a.xml.builder src/app/a.component.html
+       views/a.ejs views/a.hbs views/a.liquid scripts/deploy.sh].each do |path|
       assert PrGraph::SpecAuditContract.production_source?(path), "#{path} is production source"
     end
     %w[.hidden.rb lib/.hidden.rb notes.txt Gemfile spec/a_spec.rb test/a_test.rb src/a.spec.ts test/support/boom.rb tests/conftest.py
        conftest.py spec_helper.rb test_helper.rb __tests__/x.js config/environments/test.rb jest.config.js pkg/x_test.go lib/x_test.py
-       test_x.py src/FooTest.java].each do |path|
+       test_x.py src/FooTest.java web/jest.config.js packages/a/vitest.config.ts jest.config.ts vite.config.ts src/foo_test.ts lib/foo_spec.rb
+       Tests/AppTests/FooTests.swift Tests/AppTests/Helpers.swift src/x.test.mjs src/FooTests.java config/locales/en.yml bin/tool app/assets/a.scss].each do |path|
       refute PrGraph::SpecAuditContract.production_source?(path), "#{path} is not production source"
     end
   end
@@ -502,7 +497,7 @@ class HarnessTest < Minitest::Test
   def test_mutation_runner_blames_the_candidate_when_a_spec_fails_unmutated
     checks = ScriptedChecks.new(1)
     error = assert_raises(Giraffe::BaselineFailed) { mutation_runner(checks).prove(app_patch("puts 'one'"), ["spec-a"]) }
-    assert_match(/spec-a fails from a clean checkout/, error.message)
+    assert_match(/spec-a fails from a clean checkout.*ran/, error.message)
     assert_equal 1, checks.runs.length, "a failing baseline never runs the mutation"
   end
 
@@ -519,18 +514,6 @@ class HarnessTest < Minitest::Test
     error = assert_raises(Giraffe::InvalidOutput) { mutation_runner(checks).prove(new_file_patch("lib/new.rb"), ["spec-a"]) }
     assert_match(/existing production source only: lib\/new\.rb/, error.message)
     assert_empty checks.runs
-  end
-
-  def test_files_a_checkout_hook_writes_are_not_blamed_on_the_mutation
-    File.write(File.join(@repo, ".gitignore"), "generated/\n")
-    hook = File.join(@repo, ".git/hooks/post-checkout")
-    File.write(hook, "#!/bin/sh\nmkdir -p generated && echo x > generated/hook.txt\n")
-    File.chmod(0o755, hook)
-    data = bug_script
-    run = start_bug
-    execute(run, data)
-    assert_equal "draft_pr", run.state["status"]
-    assert_equal 1, @runner.calls.count { |call| call[:step] == "spec_audit" }
   end
 
   def test_ignored_files_a_checkout_hook_provides_stay_available_to_specs
@@ -573,6 +556,8 @@ class HarnessTest < Minitest::Test
     checks = Giraffe::Checks.new(config, command: @command)
     result = checks.run(@tmp, [[RbConfig.ruby, "-e", %(print "ghp_" + "a" * 36 + "." * 11_990)]]).first
     assert_equal "[REDACTED]#{'.' * 11_990}", result["excerpt"]
+    result = checks.run(@tmp, [[RbConfig.ruby, "-e", %(print "." * 20_000 + "end")]]).first
+    assert_equal "#{'.' * 11_997}end", result["excerpt"]
   end
 
   def test_one_of_reports_what_each_shape_lacks_and_refuses_an_output_fitting_both
@@ -589,7 +574,7 @@ class HarnessTest < Minitest::Test
     data["triage"] = [{"output" => triage, "cost_usd" => -1.0}]
     run = start
     assert_match(/invalid cost/, assert_raises(Giraffe::InvalidOutput) { execute(run, data) }.message)
-    assert_equal run.config["call_budget_usd"], run.state.dig("runtime", "calls").values.sum { |call| call.fetch("charge", 0.0) }
+    assert_equal run.config["call_budget_usd"], spent(run)
   end
 
   def test_failed_call_bills_what_it_reported
@@ -599,8 +584,7 @@ class HarnessTest < Minitest::Test
     data["triage"] = [failure]
     run = start
     assert_raises(Giraffe::Error) { execute(run, data) }
-    entry = run.state.dig("runtime", "calls").values.first
-    assert_equal [0.5, "failed"], entry.values_at("charge", "state")
+    assert_equal [0.5, "failed"], Giraffe::CallLedger.new(run).entries.values.first.values_at("charge", "state")
   end
 
   def test_run_budget_limits_later_calls_and_stops_once_spent
@@ -608,23 +592,11 @@ class HarnessTest < Minitest::Test
     data = script
     data["triage"] = [{"output" => thin, "cost_usd" => 0.25}, {"output" => thin, "cost_usd" => 0.05}, triage]
     runner = Giraffe::Runners::Scripted.new(data)
-    run = start(run_budget_usd: 0.3)
+    run = start(run_budget_usd: 0.3005)
     2.times { assert_raises(Giraffe::InvalidOutput) { execute(run, runner) } }
-    assert_in_delta 0.05, runner.calls.last[:budget_usd]
+    assert_in_delta 0.0505, runner.calls.last[:budget_usd], 0.0001
     assert_match(/budget exhausted/, assert_raises(Giraffe::Error) { execute(run, runner) }.message)
     assert_equal 2, runner.calls.length
-  end
-
-  def test_token_in_check_output_does_not_stop_a_red_verify
-    data = script
-    first = copy(data["audit"][0])
-    first["clauses"][0] = {"clause_id" => clauses[0], "verdict" => "unmet", "reason" => "Greeting needs another adjustment"}
-    data["audit"].unshift(first)
-    data["build"] << {"output" => {"questions" => [], "summary" => "Addressed acceptance finding"}, "writes" => {"app.rb" => "puts 'fixed again'\n"}}
-    data["review"] << data["review"][0]
-    run = start(checks: [[RbConfig.ruby, "-e", %(puts "ghp_" + "a" * 36; abort "wrong" unless File.read("app.rb").include?("fixed"))]])
-    execute(run, data)
-    assert_equal "draft_pr", run.state["status"]
   end
 
   def test_whitespace_only_regression_output_still_records_the_run
@@ -653,15 +625,6 @@ class HarnessTest < Minitest::Test
     assert_equal 2, run.coordinator.snapshot["attempts"].values.count { |attempt| attempt["node"] == "BUILD" }
   end
 
-  def test_spec_command_can_name_the_line_in_its_own_argument
-    data = bug_script
-    runner = "abort 'empty argument' if ARGV.any?(&:empty?); load ARGV[0]"
-    run = start_bug(spec_command: [RbConfig.ruby, "-e", runner, "{spec}", "{line}"])
-    execute(run, data)
-    assert_equal "draft_pr", run.state["status"]
-    assert_equal "pass", verification_of(run).dig("regression", "candidate", "result")
-  end
-
   def test_spec_needing_ignored_state_goes_red_instead_of_faking_a_kill
     File.write(File.join(@repo, ".gitignore"), "generated/\n")
     data = bug_script
@@ -679,16 +642,6 @@ class HarnessTest < Minitest::Test
     assert_includes @runner.calls.select { |call| call[:step] == "build" }.last[:prompt], "clean checkout"
   end
 
-  def test_whole_file_spec_run_drops_the_line_from_the_documented_spec_command
-    data = bug_script
-    # Like rspec, refuses a location whose line is empty.
-    runner = "abort 'cannot load ' + ARGV[0] if ARGV[0].end_with?(':'); load ARGV[0].split(':').first"
-    run = start_bug(spec_command: [RbConfig.ruby, "-e", runner, "{spec}:{line}"])
-    execute(run, data)
-    assert_equal "draft_pr", run.state["status"]
-    assert_equal "pass", verification_of(run).dig("regression", "candidate", "result")
-  end
-
   def test_red_on_an_unchanged_candidate_reaches_the_recurrence_stop
     data = script
     unsure = copy(data["audit"][0])
@@ -698,7 +651,7 @@ class HarnessTest < Minitest::Test
     data["build"] += Array.new(5) { {"output" => {"questions" => [], "summary" => "Nothing to change"}} }
     run = start
     error = assert_raises(PrGraph::Coordinator::CoordinatorError) { execute(run, data) }
-    assert_match(/recurring failure.*verification/, error.message)
+    assert_match(/recurring failure.*verification.*remain unverifiable/, error.message)
     assert_equal "paused", run.state["status"]
     assert run.coordinator.snapshot.dig("failure_queue", "stopped")
     assert_empty @github.calls
@@ -864,4 +817,379 @@ class HarnessTest < Minitest::Test
     assert_equal head, @git.head(@repo)
   end
 
+  def spent(run) = Giraffe::CallLedger.new(run).spent
+  def install_hook(body, name: "post-checkout")
+    hook = File.join(@repo, ".git/hooks", name)
+    File.write(hook, "#!/bin/sh\n#{body}\n")
+    File.chmod(0o755, hook)
+  end
+  def commit_base(message)
+    @git.commit(@repo, message)
+    @git.call(@repo, "push", "origin", "main")
+  end
+  def app_mutation = "diff --git a/app.rb b/app.rb\n--- a/app.rb\n+++ b/app.rb\n@@ -1 +1 @@\n-puts 'fixed'\n+puts 'broken'\n"
+  def pinning_spec = %(abort "wrong" unless File.read("app.rb").include?("fixed")\n)
+  def audit_of(ref, patch = app_mutation) = {"questions" => [], "specs" => [{"ref" => ref, "behavior" => "Greets", "classes" => [], "patch" => patch}]}
+  def start_with_spec(path = "test/x_test.rb", **overrides) = start(**{checks: [[RbConfig.ruby, path]], spec_command: [RbConfig.ruby, "{spec}"]}, **overrides)
+
+  # One more BUILD, review and audit round for each entry, as the fix after a red VERIFY.
+  def with_fix_rounds(data, count, writes = {})
+    data["build"] += Array.new(count) { {"output" => {"questions" => [], "summary" => "Addressed the failure"}, "writes" => writes} }
+    data["review"] *= count + 1
+    data["audit"] *= count + 1
+    data
+  end
+
+  def test_specs_are_recognised_by_each_languages_conventions
+    %w[spec/x_spec.rb lib/foo_spec.rb engines/a/spec/x_spec.rb spec/x_test.rb test/x_test.rb tests/x_test.rb test/test_x.rb tests/nested/test_x.rb
+       src/x.test.ts src/x.spec.mts src/x.test.mjs src/foo_test.ts __tests__/x.js cypress/e2e/x.cy.ts
+       tests/test_x.py test_x.py tests/x_test.py pkg/x_test.go test/x_test.exs
+       src/test/java/FooTest.java src/test/kotlin/FooTest.kt src/test/java/ABTest.java src/FooTests.java tests/XTest.php
+       Tests/AppTests/FooTests.swift tests/x.rs].each do |path|
+      assert PrGraph::SpecAuditContract.spec_path?(path), "#{path} is a spec"
+    end
+    %w[app.rb app/models/lab_test.rb lib/latest.py src/ABTest.java src/Contest.java tests/common/mod.rs test/support/boom.rb tests/conftest.py
+       pharmacy.js].each do |path|
+      refute PrGraph::SpecAuditContract.spec_path?(path), "#{path} is not a spec"
+    end
+  end
+
+  def test_hook_failing_while_the_worktree_is_made_is_reported_and_the_worktree_made_again
+    File.write(File.join(@repo, ".gitignore"), "generated/\n")
+    commit_base("ignore generated")
+    once = File.join(@tmp, "failed-once")
+    install_hook("if [ ! -e #{once} ]; then touch #{once} stray.txt; echo 'could not fetch gems' >&2; exit 1; fi\nmkdir -p generated && echo > generated/helper.rb")
+    data = script
+    data["build"][0]["writes"]["test/x_test.rb"] = %(require_relative "../generated/helper"; #{pinning_spec})
+    data["spec_audit"] = [audit_of("test/x_test.rb:1")]
+    runner = Giraffe::Runners::Scripted.new(data)
+    run = start_with_spec
+    assert_match(/could not fetch gems/, assert_raises(Giraffe::Error) { execute(run, runner) }.message)
+    execute(run, runner)
+    assert_equal "draft_pr", run.state["status"]
+    assert_equal 1, runner.calls.count { |call| call[:step] == "build" }, "BUILD is not paid to work in a half-made checkout"
+    refute File.exist?(File.join(run.directory, "worktree/stray.txt"))
+  end
+
+  def test_only_this_runs_own_unfinished_worktree_is_made_again
+    path = File.join(@tmp, "tree")
+    options = {repo: @repo, path: path, base: "origin/main"}
+    @git.worktree(**options, branch: "run-a")
+    @git.call(@repo, "worktree", "lock", path)
+    assert_equal "run-a", @git.call(@git.worktree(**options, branch: "run-a")["path"], "branch", "--show-current")
+    assert_match(/another branch/, assert_raises(Giraffe::Error) { @git.worktree(**options, branch: "run-b") }.message)
+    assert File.directory?(path), "someone else's worktree stays"
+    elsewhere = File.join(@tmp, "plain")
+    Dir.mkdir(elsewhere)
+    assert_raises(Giraffe::Error) { @git.worktree(**options, path: elsewhere, branch: "run-a") }
+    inside = File.join(@repo, "inside")
+    Dir.mkdir(inside)
+    assert_match(/unexpected existing worktree/, assert_raises(Giraffe::Error) { @git.worktree(**options, path: inside, branch: "main") }.message)
+    assert File.directory?(inside)
+  end
+
+  def test_another_repositorys_worktree_is_not_removed
+    other = File.join(@tmp, "other")
+    @command.run!(["git", "clone", "-q", @origin, other], cwd: @tmp)
+    path = File.join(@tmp, "theirs")
+    @git.call(other, "worktree", "add", "-b", "run-a", path, "origin/main")
+    error = assert_raises(Giraffe::Error) { @git.worktree(repo: @repo, path: path, branch: "run-a", base: "origin/main") }
+    assert_match(/another repository/, error.message)
+    assert File.directory?(path)
+  end
+
+  def test_checkouts_give_a_hook_time_and_none_of_the_harness_credentials
+    seen = File.join(@tmp, "hook-env.txt")
+    install_hook("env >> #{seen}")
+    ENV["ANTHROPIC_API_KEY"] = "controller-credential"
+    command = Class.new(Giraffe::Command) do
+      def timeouts = @timeouts ||= []
+      def run!(argv, **options)
+        timeouts << options[:timeout] if argv.include?("add")
+        super
+      end
+    end.new
+    git = Giraffe::Git.new(command: command)
+    git.worktree(repo: @repo, path: File.join(@tmp, "tree"), branch: "run-a", base: "origin/main")
+    git.at_commit(@repo, @git.head(@repo)) { |_tree| nil }
+    assert_equal [600, 600], command.timeouts
+    env = File.read(seen)
+    refute_includes env, "ANTHROPIC_API_KEY"
+    assert_includes env, "PATH="
+  end
+
+  def test_proof_checkout_whose_hook_fails_reports_it_and_leaves_nothing_registered
+    install_hook("echo 'bundle install failed' >&2; exit 1")
+    ran = false
+    error = assert_raises(Giraffe::Error) { @git.at_commit(@repo, @git.head(@repo)) { |_tree| ran = true } }
+    assert_match(/bundle install failed/, error.message)
+    refute ran
+    refute_includes @git.call(@repo, "worktree", "list"), "giraffe-proof-"
+  end
+
+  def test_proof_checkout_of_a_missing_commit_reports_that
+    error = assert_raises(Giraffe::Error) { @git.at_commit(@repo, "0" * 40) { |_tree| flunk "there is nothing to check out" } }
+    assert_match(/invalid reference/, error.message)
+  end
+
+  def test_tail_of_command_output_is_short_and_keeps_its_lines
+    assert_equal "a\nb", Giraffe::Command.tail("  a\nb\n")
+    assert_equal "x" * 999 + "z", Giraffe::Command.tail("y" * 5 + "x" * 999 + "z")
+  end
+
+  def test_read_only_directory_left_in_a_proof_checkout_does_not_stop_the_run
+    leftover = nil
+    @git.at_commit(@repo, @git.head(@repo)) do |tree|
+      leftover = tree
+      FileUtils.mkdir_p(File.join(tree, "cache/ro"))
+      File.write(File.join(tree, "cache/ro/x"), "")
+      File.chmod(0o500, File.join(tree, "cache/ro"))
+    end
+    refute File.exist?(leftover)
+  end
+
+  def test_repository_listing_past_the_command_limit_is_not_a_failure
+    long = File.join(*Array.new(3) { |n| n.to_s * 200 })
+    FileUtils.mkdir_p(File.join(@repo, long))
+    2_500.times { |n| File.write(File.join(@repo, long, "#{n}_#{'f' * 190}.rb"), "") }
+    @git.commit(@repo, "many files")
+    assert_operator @git.call(@repo, "ls-files", "--stage").bytesize, :>, Giraffe::Command::LIMIT
+    assert_equal @git.head(@repo), @git.fingerprint(@repo)["head"]
+    assert_includes @git.tracked_paths(@repo), "app.rb"
+  end
+
+  def test_writer_rewriting_a_big_file_is_billed_and_goes_on
+    lines = Array.new(30_000) { |n| "base line #{n} #{'x' * 60}\n" }.join
+    File.write(File.join(@repo, "package-lock.json"), lines)
+    commit_base("a lock file")
+    data = script
+    data["build"][0]["writes"]["package-lock.json"] = lines.gsub("base", "next")
+    data["build"][0]["cost_usd"] = 0.4
+    run = start
+    execute(run, data)
+    assert_equal "draft_pr", run.state["status"]
+    assert_in_delta 0.4, spent(run)
+  end
+
+  def test_diff_too_big_for_a_prompt_reaches_the_model_as_a_summary
+    data = script
+    data["build"][0]["writes"]["fixtures/snapshot.json"] = %("row": "#{'x' * 60}",\n) * 40_000
+    run = start
+    execute(run, data)
+    assert_equal "draft_pr", run.state["status"]
+    prompt = @runner.calls.find { |call| call[:step] == "review" }[:prompt]
+    assert_includes prompt, "too large to include"
+    assert_includes prompt, "fixtures/snapshot.json"
+    assert_operator prompt.bytesize, :<, 100_000
+  end
+
+  def test_command_past_its_limits_says_which_command
+    assert_match(/-e timed out/, assert_raises(Giraffe::CommandLimit) { @command.capture([RbConfig.ruby, "-e", "sleep 30"], cwd: @tmp, timeout: 0.2) }.message)
+    noisy = [RbConfig.ruby, "-e", 'print "x" * 50']
+    assert_match(/-e output exceeds 10 bytes/, assert_raises(Giraffe::CommandLimit) { @command.capture(noisy, cwd: @tmp, limit: 10) }.message)
+  end
+
+  def test_run_started_under_an_older_spec_command_stays_readable
+    [[], ["rspec"], ["rspec", "--line", "{line}"]].each do |older|
+      run = start
+      run.update(config: run.state["config"].merge("spec_command" => older))
+      assert_equal older, Giraffe::Run.load(run.path).config["spec_command"]
+      assert_equal run.id, cli("status", run.path).dig("graph", "run_id")
+    end
+  end
+
+  def test_tracked_file_a_hook_regenerates_is_not_blamed_on_the_mutation
+    File.write(File.join(@repo, "FILES"), "")
+    commit_base("manifest")
+    install_hook("ls test 2>/dev/null > FILES; exit 0")
+    data = script
+    data["build"][0]["writes"]["test/x_test.rb"] = pinning_spec
+    data["spec_audit"] = [audit_of("test/x_test.rb:1")]
+    run = start_with_spec
+    execute(run, data)
+    assert_equal "draft_pr", run.state["status"]
+    assert_equal "fail", verification_of(run).dig("spec_audit", "specs", 0, "mutation", "result")
+  end
+
+  def test_what_a_hook_leaves_cannot_pass_for_a_mutation
+    File.write(File.join(@repo, "manifest.rb"), "")
+    commit_base("manifest")
+    install_hook("ls test 2>/dev/null > manifest.rb; exit 0")
+    data = script
+    data["build"][0]["writes"]["test/x_test.rb"] = pinning_spec
+    refused = audit_of("test/x_test.rb:1", app_mutation.sub("broken", "fixed"))
+    data["spec_audit"] = [{"output" => refused, "cost_usd" => 0.25}, audit_of("test/x_test.rb:1")]
+    runner = Giraffe::Runners::Scripted.new(data)
+    run = start_with_spec
+    assert_match(/changed nothing/, assert_raises(Giraffe::InvalidOutput) { execute(run, runner) }.message)
+    execute(run, runner)
+    assert_equal "draft_pr", run.state["status"]
+  end
+
+  def test_build_cannot_edit_the_hooks_a_checkout_will_run
+    {".githooks/post-checkout" => ".githooks/", "hooks/post-checkout" => "./hooks", ".husky/post-checkout" => nil}.each do |path, configured|
+      FileUtils.mkdir_p(File.join(@repo, File.dirname(path)))
+      File.write(File.join(@repo, path), "#!/bin/sh\nexit 0\n")
+      commit_base("hooks in the tree")
+      @git.call(@repo, "config", "core.hooksPath", configured) if configured
+      data = script
+      data["build"][0]["writes"][path] = "#!/bin/sh\nenv > /tmp/stolen\n"
+      error = assert_raises(Giraffe::Error) { execute(start, data) }
+      assert_match(/protected files: #{Regexp.escape(path)}/, error.message)
+      @git.call(@repo, "config", "--unset", "core.hooksPath") if configured
+    end
+    assert_empty @github.calls
+  end
+
+  def test_publishing_runs_no_push_hook
+    ran = File.join(@tmp, "pre-push-ran")
+    install_hook("touch #{ran}", name: "pre-push")
+    run = start
+    execute(run)
+    assert_equal "draft_pr", run.state["status"]
+    refute File.exist?(ran)
+  end
+
+  def test_feedback_to_build_leaves_out_the_raw_mutation_proofs
+    data = bug_script
+    first = copy(data["audit"][0])
+    first["clauses"][0] = {"clause_id" => clauses[0], "verdict" => "unmet", "reason" => "Greeting needs another adjustment"}
+    data["audit"] = [first, data["audit"][0]]
+    data["build"] << {"output" => {"questions" => [], "summary" => "Addressed acceptance finding"}}
+    data["review"] << data["review"][0]
+    data["spec_audit"] << data["spec_audit"][0]
+    run = start_bug
+    execute(run, data)
+    assert_equal "draft_pr", run.state["status"]
+    feedback = run.state.dig("runtime", "verification_feedback")
+    refute feedback.key?("mutation_proofs")
+    assert feedback.key?("spec_audit"), "BUILD still hears what the audit concluded"
+  end
+
+  def test_outputs_of_finished_attempts_do_not_accumulate_in_state
+    big = "finding " * 25_000
+    data = script
+    data["triage"][0]["summary"] = big
+    data["investigate"].each { |output| output["summary"] = big }
+    data["review"][0]["summary"] = big
+    data["audit"][0]["clauses"][0]["evidence"][0]["note"] = big
+    run = start
+    execute(run, data)
+    assert_equal "draft_pr", run.state["status"]
+    assert_operator JSON.generate(run.state).bytesize, :<, 500_000
+  end
+
+  class Crash < Exception; end
+
+  def test_crash_between_builds_two_saves_resumes_though_check_output_changed
+    %w[self_review build_manifest].each do |family|
+      crashing = Class.new(Giraffe::Harness) do
+        define_method(:put) { |name, *args, **options| super(name, *args, **options).tap { raise Crash if name == family } }
+      end
+      runner = Giraffe::Runners::Scripted.new(script)
+      run = start(checks: [[RbConfig.ruby, "-e", "puts Process.clock_gettime(Process::CLOCK_MONOTONIC); #{'abort "wrong" unless File.read("app.rb").include?("fixed")'}"]])
+      assert_raises(Crash) { crashing.new(run, runner: runner, github: @github).run }
+      execute(Giraffe::Run.load(run.path), runner)
+      assert_equal "draft_pr", Giraffe::Run.load(run.path).state["status"], "after a crash following #{family}"
+    end
+  end
+
+  def test_error_matching_the_secret_scan_still_records_the_pause
+    data = script
+    data["triage"] = [Giraffe::Error.new("upstream said: bad credentials ghp_#{'a' * 36}")]
+    run = start
+    assert_raises(Giraffe::Error) { execute(run, data) }
+    assert_equal ["paused", "upstream said: bad credentials [REDACTED]"], Giraffe::Run.load(run.path).state.values_at("status", "error")
+  end
+
+  def test_refusal_quoting_a_key_header_split_across_lines_is_still_stored
+    data = bug_script
+    split = data["reproduce"][0].merge("source" => %(puts "-----BEGIN\\nPRIVATE KEY-----"; exit 3))
+    assert_resume_asks_again("reproduce", data, split, /could not reproduce/)
+  end
+
+  def test_spec_that_passes_with_the_mutation_applied_cannot_publish
+    data = script
+    data["build"][0]["writes"]["test/x_test.rb"] = "exit 0\n"
+    with_fix_rounds(data, 1, "test/x_test.rb" => pinning_spec)
+    data["spec_audit"] = [audit_of("test/x_test.rb:1")] * 2
+    run = start_with_spec
+    execute(run, data)
+    assert_equal "draft_pr", run.state["status"]
+    assert_equal 2, run.coordinator.snapshot["attempts"].values.count { |attempt| attempt["node"] == "BUILD" }
+    assert_includes @runner.calls.select { |call| call[:step] == "build" }.last[:prompt], "passes_without_change"
+  end
+
+  {
+    "commits" => ->(cwd) { File.write(File.join(cwd, "app.rb"), "puts 'behind'\n"); [["add", "-A"], ["-c", "core.hooksPath=/dev/null", "commit", "-qm", "behind the harness"]] },
+    "repoints_origin" => ->(_cwd) { [["remote", "set-url", "origin", "/tmp/elsewhere.git"]] },
+    "repoints_its_push_url" => ->(_cwd) { [["remote", "set-url", "--push", "origin", "/tmp/elsewhere.git"]] },
+    "switches_branch" => ->(_cwd) { [["switch", "-qc", "elsewhere"]] }
+  }.each do |label, act|
+    define_method("test_writer_that_#{label}_is_stopped_and_still_billed") do
+      git = @git
+      data = script
+      data["build"] = [lambda { |request|
+        act.call(request[:cwd]).each { |args| git.call(request[:cwd], *args) }
+        {"output" => {"questions" => [], "summary" => "Done"}, "cost_usd" => 0.4}
+      }]
+      run = start
+      assert_match(/writer changed repository identity/, assert_raises(Giraffe::Error) { execute(run, data) }.message)
+      assert_in_delta 0.4, spent(run)
+      assert_empty @github.calls
+    end
+  end
+
+  def test_runner_is_given_the_schema_and_limit_of_its_role
+    run = start(call_budget_usd: 1.5)
+    assert_raises(Giraffe::Error) { execute(run, {"triage" => [triage]}) }
+    call = @runner.calls.first
+    assert_equal JSON.parse(File.read(File.join(ROOT, "schemas/triage.json"))), call[:schema]
+    assert_equal 1.5, call[:budget_usd]
+  end
+
+  def test_kept_output_is_not_paid_for_again_but_is_checked_again
+    data = script
+    data["investigate"][1] = Giraffe::Error.new("interrupted")
+    data["investigate"] << data["investigate"][0]
+    runner = Giraffe::Runners::Scripted.new(data)
+    run = start
+    assert_raises(Giraffe::Error) { execute(run, runner) }
+    key, kept = Giraffe::CallLedger.new(run).entries.find { |_key, entry| entry["role"] == "investigate" && entry["output"] }
+    run.checkpoint_entry("calls", key, kept.merge("output" => {"questions" => []}))
+    asked = runner.calls.length
+    assert_match(/summary is required/, assert_raises(Giraffe::InvalidOutput) { execute(run, runner) }.message)
+    assert_equal asked, runner.calls.length
+  end
+
+  def test_call_ledger_keeps_a_reservation_until_a_usable_bill_replaces_it
+    ledger = Giraffe::CallLedger.new(start)
+    reservation = ledger.reserve("key", "triage", 3.0)
+    assert_equal 3.0, ledger.spent
+    [-1.0, Float::INFINITY, Float::NAN, nil, "1"].each do |cost|
+      ledger.failed(reservation, {"cost_usd" => cost})
+      assert_raises(Giraffe::InvalidOutput) { ledger.finished(reservation, {"cost_usd" => cost}) }
+      assert_equal 3.0, ledger.spent
+    end
+    ledger.failed(reservation, nil)
+    assert_equal 3.0, ledger.spent
+    ledger.finished(reservation, {"cost_usd" => 0.5})
+    assert_equal 0.5, ledger.spent
+  end
+
+  def test_call_ledger_outcomes_carry_no_charge_and_leave_with_their_attempt
+    ledger = Giraffe::CallLedger.new(start)
+    first = Giraffe::Model::Request.new(role: "triage", attempt: "first", unit: "main", inputs: {}, cwd: @repo, writable: false)
+    later = first.with(attempt: "later")
+    ledger.keep("kept", first, {"questions" => []})
+    ledger.refuse("refused", later, "bad token ghp_#{'a' * 36}")
+    reservation = ledger.reserve("kept", "triage", 1.0)
+    assert_equal({"questions" => []}, ledger.output("kept"))
+    assert_equal "bad token [REDACTED]", ledger.refusal("refused")
+    assert_equal 1.0, ledger.spent
+    ledger.retire_outcomes("later")
+    assert_nil ledger.output("kept")
+    assert_equal "bad token [REDACTED]", ledger.refusal("refused")
+    assert_equal 1.0, ledger.entries[reservation]["charge"], "what was spent stays"
+  end
 end

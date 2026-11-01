@@ -23,7 +23,7 @@ module Giraffe
         branch = artifact("worktree_manifest").fetch("branch")
         # Publication is a harness capability. A retried publish reuses a matching open PR and
         # validates GitHub's actual head SHA and draft state before recording success.
-        @git.call(worktree, "push", "origin", "HEAD:refs/heads/#{branch}")
+        @git.push(worktree, branch)
         manifest = @github.publish(repo: @run.config["github_repo"], worktree: worktree,
                                    base: @run.config["pr_base"], head: branch, title: body.fetch("title"), body_file: file)
         pr = manifest.fetch("pull_request")
