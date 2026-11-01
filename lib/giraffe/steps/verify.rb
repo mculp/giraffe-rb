@@ -26,7 +26,7 @@ module Giraffe
       def finish_verification(content)
         if content["failures"].positive?
           # Without the raw proofs: their outcomes are in spec_audit, and a proof per example can outgrow the state.
-          checkpoint("verification_feedback", content.except("mutation_proofs"))
+          checkpoint("verification_feedback", content.except("mutation_proofs").merge("answers_seen" => @run.state["answers"].size))
           # Per attempt: a fix batch can leave the candidate alone, and that red still counts toward the recurrence stop.
           @run.coordinator.fail(@node, @attempt, reason: content.fetch("reason"), failure_id: "verification", revision: "#{content.fetch('candidate_sha')}:#{@attempt}")
         else

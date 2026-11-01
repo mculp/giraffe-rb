@@ -667,6 +667,21 @@ class HarnessTest < Minitest::Test
     assert_includes runner.calls.select { |call| call[:step] == "audit" }.last[:prompt], "browser suite passed"
   end
 
+  def test_red_build_asked_about_itself_is_not_asked_again_once_answered
+    data = script
+    data["audit"] = [unverifiable_audit(data), data["audit"][0]]
+    data["review"] *= 2
+    data["build"] += [{"output" => {"questions" => ["Can someone run the browser suite?"]}}, {"output" => {"questions" => [], "summary" => "Nothing to change"}}]
+    runner = Giraffe::Runners::Scripted.new(data)
+    run = start
+    execute(run, runner)
+    question = run.state["questions"].first
+    assert_equal "Can someone run the browser suite?", question["text"]
+    run.answer(question["id"], "It passed on this candidate")
+    execute(run, runner)
+    assert_equal "draft_pr", run.state["status"]
+  end
+
   def test_red_an_answer_does_not_settle_reaches_the_recurrence_stop
     data = script
     data["audit"] = [unverifiable_audit(data)] * 6

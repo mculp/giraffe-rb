@@ -58,15 +58,15 @@ module Giraffe
         finish
       end
 
-      # The same candidate can only come back red, so what BUILD has no edit for is a person's to settle.
+      # The same candidate can only come back red, so what BUILD has no edit for is a person's to settle, unless one
+      # has answered since that red, whether this question or one BUILD asked for itself.
       def ask_a_person_if_unchanged(feedback)
-        id = "verification-#{@attempt}"
-        return unless @git.head(worktree) == feedback.fetch("candidate_sha") && !@run.state["answers"].key?(id)
+        return unless @git.head(worktree) == feedback.fetch("candidate_sha") && @run.state["answers"].size == feedback["answers_seen"]
         open_clauses = feedback.dig("ac_audit", "clauses").to_a.reject { |row| row["verdict"] == "met" }
         details = open_clauses.map { |row| "#{row['clause_id']}: #{row['reason']}" }.join(" ")
         text = "VERIFY stays red and BUILD found no edit to make: #{feedback.fetch('reason')}. #{details} " \
                "Please answer with evidence, such as what a command printed on #{feedback.fetch('candidate_sha')}, or with what should change."
-        @run.update(status: "waiting_for_answers", questions: [{"id" => id, "text" => text, "role" => "build", "attempt_id" => @attempt}])
+        @run.update(status: "waiting_for_answers", questions: [{"id" => "verification-#{@attempt}", "text" => text, "role" => "build", "attempt_id" => @attempt}])
         raise Parked, "waiting for a person's answer"
       end
 
