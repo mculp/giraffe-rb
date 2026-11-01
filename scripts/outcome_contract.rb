@@ -238,7 +238,7 @@ module PrGraph
     def require_mechanism_free!(value, label)
       require_text!(value, label)
       pattern = @mechanism_patterns.find { |candidate| value.match?(candidate) }
-      error!("#{label} names an implementation mechanism") if pattern
+      error!("#{label} names an implementation mechanism: #{value[pattern]}") if pattern
     end
   end
 end
