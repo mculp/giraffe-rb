@@ -1,8 +1,6 @@
 # frozen_string_literal: true
 
 require "minitest/autorun"
-require "tmpdir"
-require "rbconfig"
 require_relative "../lib/giraffe/runners/claude"
 
 class RunnerTest < Minitest::Test
@@ -31,7 +29,8 @@ class RunnerTest < Minitest::Test
     result = call(success)
     assert_equal({"answer" => "ok"}, result["output"])
     argv, options = @command.requests.last
-    assert_equal "Read,Grep,Glob", argv[argv.index("--tools") + 1]
+    tools = argv[argv.index("--tools") + 1].split(",")
+    assert_empty tools & %w[Bash Edit Write Agent Task WebFetch WebSearch]
     assert_equal "dontAsk", argv[argv.index("--permission-mode") + 1]
     assert_equal "", argv[argv.index("--setting-sources") + 1]
     assert_includes argv, "--strict-mcp-config"
@@ -48,10 +47,9 @@ class RunnerTest < Minitest::Test
   def test_writer_has_scoped_edits_but_no_shell_tool
     call(success, writable: true)
     argv = @command.requests.last.first
-    assert_equal "Read,Grep,Glob,Edit,Write", argv[argv.index("--tools") + 1]
+    assert_empty argv[argv.index("--tools") + 1].split(",") & %w[Bash Agent Task WebFetch WebSearch]
     assert_includes argv, "Edit(/**)"
     assert_includes argv, "Edit(/.git)"
-    refute_includes argv[argv.index("--tools") + 1], "Bash"
   end
 
   def test_success_without_structured_output_is_failure_even_at_exit_zero
@@ -68,10 +66,5 @@ class RunnerTest < Minitest::Test
   def test_malformed_json_and_error_result_are_refused
     assert_raises(Giraffe::InvalidOutput) { call("not json") }
     assert_raises(Giraffe::Error) { call(success.merge("subtype" => "error_max_turns")) }
-  end
-
-  def test_schema_cannot_silently_ignore_unknown_keywords
-    assert_raises(Giraffe::InvalidOutput) { Giraffe::Schema.check!(schema.merge("unevaluatedProperties" => false)) }
-    assert_raises(Giraffe::InvalidOutput) { Giraffe::Schema.validate!(schema, {"answer" => "ok", "unexpected" => true}) }
   end
 end

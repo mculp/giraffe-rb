@@ -42,6 +42,12 @@ The tests use temporary directories and fakes for `gh` and Temper, so they reach
 state, GitHub, or Temper. CI (`.github/workflows/test.yml`) runs `bin/test` on every PR and every
 push to `main`.
 
+New tests should catch failures that lose work, publish unverified changes, corrupt evidence, or
+break recovery. Prefer observable outcomes with real temporary Git repositories and executable
+checks. Avoid coverage targets and assertions about private methods, incidental JSON formatting,
+or exact tool ordering. Scripted tests verify harness behavior; model quality and effective provider
+permissions require live probes.
+
 ## Credentials
 
 Never commit secrets. Giraffe reads credentials only from the environment: the engineer's Claude
