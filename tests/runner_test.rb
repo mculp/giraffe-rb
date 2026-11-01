@@ -76,6 +76,14 @@ class RunnerTest < Minitest::Test
     end
   end
 
+  def test_plan_schema_offers_only_the_evidence_roles_the_contract_accepts
+    root = File.expand_path("..", __dir__)
+    contract = JSON.parse(File.read(File.join(root, "references/outcome-contract-v1.json"))).fetch("implementation_plan")
+    plan = JSON.parse(File.read(File.join(root, "schemas/plan.json"))).fetch("oneOf").last
+    evidence = plan.dig("properties", "implementation_plan", "properties", "steps", "items", "properties", "evidence", "items", "oneOf")
+    assert_equal contract.fetch("roles") - ["gap"], evidence.first.dig("properties", "role", "enum")
+  end
+
   def test_a_failed_call_says_why_in_claudes_own_words
     error = assert_raises(Giraffe::Error) { call(success.merge("is_error" => true, "result" => "You've hit your 5-hour limit")) }
     assert_includes error.message, "5-hour limit"
