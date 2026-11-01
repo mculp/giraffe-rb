@@ -10,7 +10,7 @@ module PrGraph
   # A bug ticket's reported steps are run against the base before anything is planned, so the plan
   # starts from the code path the steps actually take rather than the one the ticket implies.
   class ReproContract
-    class ReproError < ContractError; end
+    class ReproError < ContentError; end
 
     STATUSES = %w[reproduced not_reproduced not_applicable].freeze
     FIELDS = {

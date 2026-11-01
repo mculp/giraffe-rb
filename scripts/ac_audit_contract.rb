@@ -11,7 +11,7 @@ module PrGraph
   # report, and rules on every outcome clause. It also lists ticket criteria the outcome register
   # missed, so a thin register cannot hide a case the ticket asked for.
   class AcAuditContract
-    class AuditError < ContractError; end
+    class AuditError < ContentError; end
 
     ALLOWED_INPUTS = %w[triage_brief investigation_report].freeze
     CLAUSE_FIELDS = {

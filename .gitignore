@@ -27,6 +27,7 @@ venv/
 
 # Logs
 *.log
+.giraffe/
 
 # The build skill's eval suite, not build output
 !evals/build/

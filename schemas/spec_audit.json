@@ -1,0 +1,81 @@
+{
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "questions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1
+        }
+      },
+      "required": [
+        "questions"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "questions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "maxItems": 0
+        },
+        "specs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "ref": {
+                "type": "string",
+                "minLength": 1
+              },
+              "behavior": {
+                "type": "string",
+                "minLength": 1
+              },
+              "classes": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "restates_literal",
+                    "framework_behavior",
+                    "mocks_subject",
+                    "duplicate_or_unplanned",
+                    "passes_without_change"
+                  ]
+                },
+                "minItems": 0
+              },
+              "patch": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "ref",
+              "behavior",
+              "classes",
+              "patch"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 0
+        }
+      },
+      "required": [
+        "questions",
+        "specs"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

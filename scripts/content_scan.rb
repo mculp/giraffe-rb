@@ -22,6 +22,8 @@ module PrGraph
       end
     end
 
+    def redact(text) = text.gsub(SECRET, "[REDACTED]")
+
     # Checks unescaped strings: JSON escapes a newline to `\n`, which hides the token after it from `\b`.
     def texts(value)
       case value

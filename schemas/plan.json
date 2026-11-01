@@ -1,0 +1,230 @@
+{
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "questions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1
+        }
+      },
+      "required": [
+        "questions"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "questions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "maxItems": 0
+        },
+        "implementation_plan": {
+          "type": "object",
+          "properties": {
+            "steps": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "classification": {
+                    "type": "string",
+                    "enum": [
+                      "CONFORM",
+                      "EXTEND",
+                      "AMEND"
+                    ]
+                  },
+                  "intent": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "outcome_ids": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "minItems": 1
+                  },
+                  "evidence": {
+                    "type": "array",
+                    "items": {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "role": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "kind": {
+                              "type": "string",
+                              "enum": [
+                                "codebase",
+                                "prior_art",
+                                "ticket",
+                                "reproduction"
+                              ]
+                            },
+                            "ref": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "claim": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "required": [
+                            "role",
+                            "kind",
+                            "ref",
+                            "claim"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "role": {
+                              "const": "gap"
+                            },
+                            "kind": {
+                              "const": "gap"
+                            },
+                            "reason": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "searched": {
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "minItems": 1
+                            }
+                          },
+                          "required": [
+                            "role",
+                            "kind",
+                            "reason",
+                            "searched"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    },
+                    "minItems": 1
+                  }
+                },
+                "required": [
+                  "id",
+                  "classification",
+                  "intent",
+                  "outcome_ids",
+                  "evidence"
+                ],
+                "additionalProperties": false
+              },
+              "minItems": 1
+            }
+          },
+          "required": [
+            "steps"
+          ],
+          "additionalProperties": false
+        },
+        "test_plan": {
+          "type": "object",
+          "properties": {
+            "coverage": {
+              "type": "array",
+              "items": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "outcome_id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "status": {
+                        "const": "planned"
+                      },
+                      "planned_node": {
+                        "const": "VERIFY"
+                      },
+                      "strategy": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "required": [
+                      "outcome_id",
+                      "status",
+                      "planned_node",
+                      "strategy"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "outcome_id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "status": {
+                        "const": "uncovered"
+                      },
+                      "reason": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "required": [
+                      "outcome_id",
+                      "status",
+                      "reason"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "minItems": 1
+            }
+          },
+          "required": [
+            "coverage"
+          ],
+          "additionalProperties": false
+        },
+        "ui": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "questions",
+        "implementation_plan",
+        "test_plan",
+        "ui"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

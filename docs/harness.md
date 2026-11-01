@@ -1,6 +1,8 @@
 # Giraffe: code delivers the PR, models judge
 
-Status: design. Implementation lands in the PRs listed under Rollout.
+Status: target design. The first executable slice is documented in [running.md](running.md).
+That implementation uses local journals with live Temper mirroring; it stops at a reviewed draft PR.
+Later sections here describe the full target, including stages not yet implemented.
 
 ## Problem
 
@@ -36,9 +38,9 @@ plugin can make it run a step it skipped.
    tool list, and a required output schema. The harness validates the output and records it. Missing
    or invalid output fails the step. The model never sees the graph, SKILL.md, or the run's other
    steps.
-3. **Temper is the run store.** Events, artifacts, failures, and questions are written to Temper,
-   and the harness keeps no run state that Temper does not have. Tests use the fake Temper in
-   `evals/fixtures`.
+3. **Local journals and live Temper mirroring store a run.** Every local durable write is mirrored
+   during execution. Outages leave visible pending writes for retry, and complete checkpoints delimit
+   safe remote recovery. Tests use the fake Temper in `evals/fixtures`.
 4. **A capability the model should not use is absent, not guarded.** Pushing, opening and editing
    PRs, labels, Linear, and Temper writes are harness code. Model calls get none of them, so there
    is no push guard.
@@ -192,7 +194,7 @@ prompt. A second failure fails the step through the failure contract, which foll
 edges.
 
 Every call starts fresh, BUILD's fix batches included. A fix batch's inputs are the plan, the
-current diff, and the batch's findings, all read from Temper, so a batch runs the same after a
+current diff, and the batch's findings, all read from the durable run store, so a batch runs the same after a
 restart or on a new VM.
 
 ```ruby
@@ -247,56 +249,25 @@ A Cursor VM exists only behind a Cursor cloud agent, so the cloud agent is a lau
   from Temper.
 - Liveness comes from that heartbeat, not from the launcher model doing what it was asked.
 
-### Temper store
+### Local journals and live Temper
 
-- One resource per run in the giraffe runs context. `Store.new(context:, run_id:, ticket:)` takes the
-  context ref, which the harness supplies from `PR_GRAPH_RUNS_CONTEXT`. `open!` finds or creates the
-  resource and declares every kind below with enforcement on, so Temper refuses a malformed write. A
-  shape's title carries a digest of the schema, and `open!` declares a kind again when the shape
-  Temper holds has a different digest.
-  `lib/giraffe/shapes.rb` builds the shapes from the v1 contracts: each event type is a branch that
-  allows its own fields and no others.
-- The kinds are `giraffe-run-event-log`, `giraffe-run-artifact-log`, and `giraffe-run-failure-log`
-  (one transition each: `{transition_id, events}`), `giraffe-run-<family>` for an artifact's evidence
-  (`{record, content}`, the content as UTF-8 text), and `giraffe-run-manifest` (`{name, text}`, a
-  coordinator lease or result). This is a different layout from the finished-run record in
-  `docs/run-records.md`, which keeps one current log per `pr-graph-` kind; the prefixes keep the two
-  from sharing an enforcing shape in one context.
-- **One transition, one write.** The events one append emits together, such as an outcome with its
-  edge and node-done events, go to Temper in a single write. The precedence is the first event's
-  sequence number, and the correlation is the attempt's ID, or the run ID when no attempt is named.
-- **Artifacts first.** A step's evidence is written before the artifact-log transition that names
-  it, and a failed evidence write stops the transition and leaves no local row or blob. `hydrate`
-  skips evidence and manifests no record names, so a crash between the writes costs only a rerun of
-  that step.
-- **A transition names only artifacts the store holds.** A failure finding's `artifact_ids` and an
-  artifact link's two ends must each have evidence in Temper, or the write raises `Store::Error`
-  naming the artifact. An artifact whose write was refused, such as one carrying a secret, is never
-  named by a later transition, so a read-back never refers to it.
-- **Stored before local.** The stored logs and coordinator write through Temper first and append
-  locally only after it takes the write. A write the store does not take is not in the local log.
-- **Retries are idempotent.** A write that fails is retried after 1, 5, and 25 seconds with the same
-  bytes, so one that already landed repeats the same transition ID and content. `hydrate` keeps one
-  copy of identical transitions. A sequence gap, or two different transitions with one ID, raises.
-- **A local log behind Temper fails closed.** If the process dies after Temper takes a transition and
-  before the local log does, the local log lacks a sequence number Temper holds. The first append a
-  process makes to each log, and the first after a failed one, lists the kind in Temper and raises
-  `Store::Error` when Temper holds that sequence number or a later one. The run parks, and
-  `hydrate` into a new path rebuilds it from Temper.
-- An attempt is a correlation ID on its writes, not a resource, which keeps attempts out of search.
-- `scripts/content_scan.rb` holds the secret scan and the 1 MB limit, shared with `run_record.rb`. A
-  write that fails either raises `Store::Error` before any Temper call, naming the kind and the
-  reason and never the content. Nothing is withheld: the run parks until a person removes the secret.
-- If Temper does not take a write after the retries, the store raises `Store::Error` with the CLI's
-  reason, and the harness parks the run. There is no offline mode.
-- **Hydrate.** `store.hydrate(path)` rebuilds a run from Temper at a path that ends in
-  `.jsonl` and holds nothing yet. The file must be named as the run's event log was when it was
-  written, because an artifact record names its content by that name. The run is staged in a hidden
-  directory beside the path, checked by the three logs' validators, and moved into place only if it
-  is valid.
-- What a run settles still reaches project contexts only through the human gate in
-  `docs/temper-grounding.md`.
-- Personal, team, and meta knowledge, and who reads and writes each, follow `docs/knowledge.md`.
+The executable storage contract is in [running.md](running.md#local-files-and-live-temper).
+Local JSONL journals, evidence blobs, coordinator manifests, and state revisions are durable first.
+Each committed change is mirrored immediately, including a node's start, model-call progress,
+questions, and answers. An unavailable Temper leaves visible pending work; step boundaries and
+`sync` reconcile the journals rather than relying on a separate volatile queue.
+
+The harness uses schema-digested physical kinds in a shared context and a live-run resource identity
+that cannot be mistaken for a finished-run record. Live metadata is separate from recoverable
+checkpoint metadata. A checkpoint names exact log lengths and manifest digests, and is published only
+after its referenced evidence and transitions are present. Hydration refuses missing, corrupt, or
+conflicting history and validates coordinator manifests before installing files.
+
+`PrGraph::Store` and its `Stored*` classes retain the earlier remote-first primitive for existing
+callers. The harness's `LocalStore` uses local-first observer classes instead. A run's configured
+mode is explicit: `mirrored` or `local`. Do not run two hosts against the same run: distributed fencing
+remains a prerequisite for automatic cloud failover. Proposed Temper additions are described in
+[temper-capabilities.md](temper-capabilities.md).
 
 ### Questions and people
 
@@ -305,7 +276,7 @@ A Cursor VM exists only behind a Cursor cloud agent, so the cloud agent is a lau
   question waits.
 - When only parked steps remain, the harness records its state and exits.
 - `bin/giraffe status` lists open questions, and `bin/giraffe answer <run> <question> "<text>"`
-  writes the answer to Temper. The controller then restarts the harness, which resumes from Temper.
+  writes the answer to Temper. The controller then resumes the harness from its local journal or a validated remote checkpoint.
 - People answer questions; no model answers another's. A step whose question the plan or the
   project context would settle gets those as inputs.
 - Approvals that exist today, such as the seed script and declined findings that need a call, are
@@ -332,8 +303,7 @@ becomes this entry point plus the per-step prompts.
   scheduler, with its stacked bases, reopens and rebases when a parent pushes, and
   `TEST_ENV_NUMBER` offsets for local children.
 - **Goes:** `push_guard.rb`; the orchestrator role in SKILL.md; the supervisor session that answers
-  program children's questions; `program_driver.sh` and the tmux launch; local journals as run
-  state; and the headless-children design, since no model runs a graph.
+  program children's questions; `program_driver.sh` and the tmux launch; and the headless-children design, since no model runs a graph.
 
 ## Alternatives
 
@@ -345,7 +315,7 @@ becomes this entry point plus the per-step prompts.
 | Cursor TypeScript SDK | The Cloud Agents API is REST and SSE, which Ruby calls directly. Revisit if the `cursor` runner needs something only the SDK has. |
 | Each step as its own Cursor cloud run, driven from outside the VM | Code steps would become requests to a model ("run the specs"), which is the failure this design removes. A fresh context per step would also need a new VM per step. |
 | Messaging between sessions (SendMessage, agent teams, Cursor steer) | Nothing durable records the message, and delivery depends on session names. No session outlives its step, so there is nothing to message. |
-| Local journals with Temper as a copy | Cloud VMs don't keep their disks, and two stores drift. |
+| Independent local and remote stores | Chosen instead: one local journal with live mirroring, visible pending writes, and explicit recovery checkpoints. |
 | Resuming BUILD's writer session across fix batches | A relaunched VM cannot resume a session the old VM's disk held, so BUILD would behave one way locally and another in the cloud. Fresh calls with inputs from Temper behave the same everywhere. |
 | A model that answers questions the plan settles | The asking step can be given the plan instead, and a person's answer is one the run can cite. |
 

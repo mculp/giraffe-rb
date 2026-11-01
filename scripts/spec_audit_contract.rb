@@ -12,7 +12,7 @@ module PrGraph
   # spec fails to pin behavior, and its named behavior is mutated to prove the spec goes red. A spec
   # that restates the code it covers passes review and CI while catching nothing.
   class SpecAuditContract
-    class SpecAuditError < ContractError; end
+    class SpecAuditError < ContentError; end
 
     CLASSES = %w[
       restates_literal
@@ -22,10 +22,32 @@ module PrGraph
       passes_without_change
     ].freeze
     MUTATION_RESULTS = %w[fail pass].freeze
-    SPEC_PATH = %r{(\A|/)(spec|test)/.+(_spec\.rb|_test\.rb)\z|\.(spec|test)\.[jt]sx?\z}
+    # Each language's naming conventions for a test. A changed file named nothing like these owes no audit, so a
+    # convention missing here is a spec nobody proves.
+    SPEC_PATH = Regexp.union(
+      /_spec\.rb\z/, %r{(\A|/)(spec|tests?)/(.+/)?(\w+_test|test_\w+)\.rb\z},
+      /[._](spec|test|cy)\.[cm]?[jt]sx?\z/, %r{(\A|/)__tests__/.+\.[cm]?[jt]sx?\z},
+      /_test\.(go|py|exs)\z/, %r{(\A|/)test_\w+\.py\z},
+      /[a-z]Tests?\.(java|kt|php|swift)\z/, %r{(\A|/)[Tt]ests?/(.+/)?\w*Tests?\.(java|kt|php|swift)\z},
+      %r{(\A|/)tests/[^/]+\.rs\z}
+    )
+    SOURCE_FILE = /\.(rb|rake|erb|haml|slim|jbuilder|rabl|builder|html|ejs|hbs|liquid|sh|[cm]?[jt]sx?|vue|svelte|py|go|rs|java|kt|swift|php|ex|exs|heex)\z/
+    HIDDEN_PATH = %r{(\A|/)\.}
+    # Code that exists to run tests rather than the product, beyond the specs themselves.
+    TEST_CODE = %r{
+      (\A|/)(spec|[Tt]ests?|__tests__)/ |
+      (\A|/)(spec_helper|rails_helper|test_helper|conftest)\.\w+\z |
+      (\A|/)config/environments/test\.rb\z |
+      (\A|/)(jest|vitest|karma|mocha|cypress|playwright)\.config\.[cm]?[jt]s\z | \A[^/]+\.config\.[cm]?[jt]s\z
+    }x
 
     def self.spec_path?(path)
       SPEC_PATH.match?(path)
+    end
+
+    # Whether a mutation here changes what the product does, rather than how it is tested or configured.
+    def self.production_source?(path)
+      SOURCE_FILE.match?(path) && !HIDDEN_PATH.match?(path) && !TEST_CODE.match?(path) && !spec_path?(path)
     end
 
     # Spec files the candidate adds or changes since the base.

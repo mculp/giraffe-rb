@@ -9,14 +9,19 @@ with a fresh context, a fixed tool list, and a validated output schema. Temper i
 
 ## Status
 
-The harness is not built yet; the design's Rollout section lists what lands next. This repo holds
-pr-graph's coordinator, contracts, tests, and evals, copied from the `pr-graph` plugin. The plugin
-still runs its own copy, so a fix to a shared script lands in both until `/giraffe` calls this repo.
+The first executable harness runs through a reviewed draft PR with local journals, live Temper
+mirroring, fresh Claude calls, executable verification, and resumable questions. CI/bot/deployment
+and cloud/program automation remain separate follow-up stages. A draft PR does not mean DONE.
+
+- [Run it](docs/running.md): configuration, commands, storage, and current limits
+- [Live graph API](docs/graph-api.md): snapshots/events for a future frontend and editing boundary
 
 ## Layout
 
 | Path | Holds |
 | --- | --- |
+| `bin/giraffe`, `lib/giraffe/` | Controller, harness, runners, local store, live Temper sync, and graph read model |
+| `prompts/`, `schemas/` | Fresh-context role instructions and validated model outputs |
 | `scripts/` | The coordinator, contract, CI, feedback, seed, metrics, run record, and Temper scripts |
 | `references/` | The v1 contracts, the coordinator policy, the automated feedback authors, and their docs |
 | `tests/` | A shell test per script |
@@ -36,6 +41,12 @@ bin/test
 The tests use temporary directories and fakes for `gh` and Temper, so they reach no real run
 state, GitHub, or Temper. CI (`.github/workflows/test.yml`) runs `bin/test` on every PR and every
 push to `main`.
+
+New tests should catch failures that lose work, publish unverified changes, corrupt evidence, or
+break recovery. Prefer observable outcomes with real temporary Git repositories and executable
+checks. Avoid coverage targets and assertions about private methods, incidental JSON formatting,
+or exact tool ordering. Scripted tests verify harness behavior; model quality and effective provider
+permissions require live probes.
 
 ## Credentials
 

@@ -29,7 +29,7 @@ module PrGraph
   class Store
     class Error < StandardError; end
 
-    TAG = "pr-graph-run"
+    TAG = "giraffe-live-run"
     UUID = Shapes::PATTERNS.fetch("uuid").delete_prefix("^").delete_suffix("$")
     ARTIFACT_ID = /\A#{UUID}\z/
     MANIFEST_NAME = /\A(?<attempt>#{UUID})\.[a-z_]+\.json\z/i
@@ -40,13 +40,14 @@ module PrGraph
 
     attr_reader :context, :run_id
 
-    def initialize(context:, run_id:, ticket:, cli: TemperCli.new, backoff: [1, 5, 25])
+    def initialize(context:, run_id:, ticket:, cli: TemperCli.new, backoff: [1, 5, 25], versioned: false)
       @context = context
       @run_id = run_id
       @ticket = ticket
       @cli = cli
       @backoff = backoff
       @in_step = Set.new
+      @versioned = versioned
     end
 
     # Finds or creates the run's resource and makes every kind enforcing under the shape the contracts
@@ -55,10 +56,11 @@ module PrGraph
       @resource = find_resource || create_resource
       declared = temper("data-artifact", "schema", "list", "--context", context).to_h { |shape| [shape["kind"], shape] }
       shapes.each do |kind, schema|
-        next if declared_current?(declared[kind], schema)
+        physical = physical_kind(kind)
+        next if declared_current?(declared[physical], schema)
 
         with_file(JSON.generate(schema)) do |path|
-          temper("data-artifact", "schema", "declare", context, "--kind", kind, "--enforcement", "enforcing", "--content", "@#{path}")
+          temper("data-artifact", "schema", "declare", context, "--kind", physical, "--enforcement", "enforcing", "--content", "@#{path}")
         end
       end
       self
@@ -73,7 +75,7 @@ module PrGraph
       end
 
       with_file(json) do |path|
-        temper("data-artifact", "commit", resource, "--kind", kind, "--intent", "member", "--precedence", precedence.to_s,
+        temper("data-artifact", "commit", resource, "--kind", physical_kind(kind), "--intent", "member", "--precedence", precedence.to_s,
                "--content", "@#{path}", "--correlation", correlation).fetch("artifact_id")
       end
     end
@@ -111,6 +113,16 @@ module PrGraph
       @event_log ||= StoredEventLog.new(self)
     end
 
+    def read_records(kind)
+      raise Error, "#{context} holds no run #{run_id}" unless resource
+      contents(kind)
+    end
+
+    # The run's last fully synced harness state, if it has one.
+    def latest_checkpoint
+      read_records(Shapes::HARNESS).max_by { |row| row.fetch("revision") }
+    end
+
     def artifact_log
       @artifact_log ||= StoredArtifactLog.new(self, execution_log: event_log)
     end
@@ -139,14 +151,20 @@ module PrGraph
                  "#{File.join(dir, base)}.artifacts", "#{File.join(dir, base)}.coordinator"]
       raise Error, "#{targets.find { |target| File.exist?(target) }} already exists" if targets.any? { |target| File.exist?(target) }
 
-      resource || raise(Error, "#{context} holds no run #{run_id}")
-      events = transitions(EVENT_LOG)
+      checkpoint = latest_checkpoint&.dig("runtime", "sync_checkpoint")
+      events = synced_rows(EVENT_LOG, checkpoint)
       raise Error, "#{context} holds no #{EVENT_LOG} for run #{run_id}" if events.empty?
 
-      artifact_events = transitions(ARTIFACT_LOG)
-      failures = transitions(FAILURE_LOG)
+      artifact_events = synced_rows(ARTIFACT_LOG, checkpoint)
+      failures = synced_rows(FAILURE_LOG, checkpoint)
       blobs = blobs_for(artifact_events, base)
       manifests = manifests_for(events)
+      if checkpoint
+        expected = checkpoint.fetch("manifests")
+        manifests = manifests.slice(*expected.keys)
+        actual = manifests.transform_values { |text| Digest::SHA256.hexdigest(text) }
+        raise Error, "synced coordinator manifests are missing or changed" unless actual == expected
+      end
 
       FileUtils.mkdir_p(dir, mode: 0o700)
       stage = File.join(dir, ".#{base}.hydrate-#{SecureRandom.hex(4)}")
@@ -180,6 +198,16 @@ module PrGraph
 
     def shapes
       @shapes ||= Shapes.build
+    end
+
+    def versioned_kinds
+      shapes.to_h { |kind, schema| [kind, "#{kind}-#{Digest::SHA256.hexdigest(JSON.generate(schema))[0, 16]}"] }
+    end
+
+    # Finding the resource is what loads the run's kind map, so it comes first.
+    def physical_kind(kind)
+      resource
+      @kind_map ? @kind_map.fetch(kind) : kind
     end
 
     # One transition of a log: every event one append added, written as one unit.
@@ -222,25 +250,37 @@ module PrGraph
                    "Hydrate the run from Temper into a new path instead of appending here"
     end
 
+    # A versioned kind's name already carries its schema's digest, so only an unversioned one needs reading back.
     def declared_current?(shape, schema)
-      shape && shape["enforcement"] == "enforcing" &&
-        temper("data-artifact", "schema", "show", shape.fetch("shape_id")).dig("schema", "title") == schema["title"]
+      return false unless shape && shape["enforcement"] == "enforcing"
+
+      @kind_map || temper("data-artifact", "schema", "show", shape.fetch("shape_id")).dig("schema", "title") == schema["title"]
     end
 
     def find_resource
       rows = temper("resource", "list", "--context", context, "--type", "research", "--title-contains", run_id,
                     "--all", "--with", "open-meta").fetch("rows")
-      rows.find { |row| row.dig("open_meta", "pr_graph_run") == run_id }&.fetch("id")
+      matches = rows.select { |row| row.dig("open_meta", "giraffe_run_id") == run_id }
+      raise Error, "multiple live resources claim run #{run_id}; reconcile them before writing" if matches.length > 1
+      return nil if matches.empty?
+      @kind_map = matches.first.dig("open_meta", "giraffe_kind_map")
+      if @kind_map && @kind_map != versioned_kinds
+        raise Error, "run uses different contracts; resume it with its pinned Giraffe release"
+      end
+      matches.first.fetch("id")
     end
 
     def create_resource
-      meta = JSON.generate("tags" => [TAG], "pr_graph_run" => run_id, "ticket" => @ticket)
-      body = "# pr-graph run #{@ticket} #{run_id}\n\nThis run is in progress. Its event, artifact, and failure logs, its " \
+      @kind_map = versioned_kinds if @versioned
+      meta = JSON.generate({"tags" => [TAG], "giraffe_run_id" => run_id, "ticket" => @ticket, "giraffe_kind_map" => @kind_map}.compact)
+      body = "# giraffe live run #{@ticket} #{run_id}\n\nThis run is in progress. Its event, artifact, and failure logs, its " \
              "coordinator manifests, and its artifacts are stored here as data artifacts as the harness writes them.\n"
       with_file(body) do |path|
-        temper("resource", "create", "--type", "research", "--context", context, "--title", "pr-graph run #{@ticket} #{run_id}",
+        @cli.call("resource", "create", "--type", "research", "--context", context, "--title", "giraffe live run #{@ticket} #{run_id}",
                "--open-meta", meta, "--body", "@#{path}").fetch("id")
       end
+    rescue TemperCli::Error => error
+      find_resource || raise(Error, "resource creation was not confirmed: #{error.message}; retry sync to reconcile")
     end
 
     # The first attempt an event belongs to, which every write of that attempt is correlated under.
@@ -276,7 +316,7 @@ module PrGraph
     end
 
     def contents(kind)
-      temper("data-artifact", "list", resource, "--kind", kind).map { |row| row.fetch("content") }
+      temper("data-artifact", "list", resource, "--kind", physical_kind(kind)).map { |row| row.fetch("content") }
     end
 
     # The events of a log in order, each transition once. Two different transitions under one ID raise; a gap
@@ -290,6 +330,17 @@ module PrGraph
         held[id] = content
       end
       held.values.flat_map { |content| content.fetch("events") }.sort_by { |event| event.fetch("seq") }
+    end
+
+    # A log's events up to what the checkpoint synced: live rows past it are not silently adopted.
+    def synced_rows(kind, checkpoint)
+      rows = transitions(kind)
+      return rows unless checkpoint
+
+      count = checkpoint.fetch("logs").fetch(kind)
+      raise Error, "synced #{kind} rows are missing" if rows.length < count
+
+      rows.first(count)
     end
 
     def canonical(value)
@@ -352,6 +403,8 @@ module PrGraph
       execution_events = event_log.validate_file!(execution_path)
       artifact_log.validate_file!(artifact_path, execution_path: execution_path)
       failure_log.validate_file!(failure_path, execution_events: execution_events)
+      Coordinator.new(execution_path: execution_path, run_id: run_id,
+                      session: execution_events.first.fetch("session")).snapshot
     rescue ContractError => e
       raise Error, "the stored run is not a valid run: #{e.message}"
     end
@@ -373,7 +426,8 @@ module PrGraph
     end
   end
 
-  # An event log whose appends are stored first.
+  # An event log whose appends go through its store's `append`, which orders them against the local write:
+  # Store takes each in Temper first and refuses on failure; Giraffe::LocalStore journals first and mirrors after.
   class StoredEventLog < EventLog
     def initialize(store, contract_path: nil)
       @store = store
@@ -387,7 +441,7 @@ module PrGraph
     end
   end
 
-  # An artifact log whose appends are stored first, each artifact's content before the transition naming it.
+  # An artifact log whose appends go through its store, each artifact's content before the transition naming it.
   class StoredArtifactLog < ArtifactLog
     def initialize(store, contract_path: nil, execution_log: EventLog.new)
       @store = store
@@ -404,7 +458,7 @@ module PrGraph
     end
   end
 
-  # A failure log whose appends are stored first.
+  # A failure log whose appends go through its store.
   class StoredFailureLog < FailureLog
     def initialize(store, contract_path: nil, execution_log: EventLog.new)
       @store = store

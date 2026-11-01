@@ -421,10 +421,44 @@ module PrGraph
         runnable, = runnable_nodes(state)
         open_attempts = state.fetch("attempts").values.select { |attempt| attempt["state"] == "open" }
         if !state.fetch("terminal") && runnable.empty? && open_attempts.empty?
-          error!("run is stalled: no runnable node, open attempt, or terminal DONE")
+          error!(recurring_failure_stop(state) || "run is stalled: no runnable node, open attempt, or terminal DONE")
         end
         resume_projection(state, worktree: worktree, offline: offline)
       end
+    end
+
+    # Validated local projection without contacting GitHub or requiring the old worktree.
+    # Used by the harness and by Store before installing a recovered run.
+    def snapshot
+      with_lock { load_state }
+    end
+
+    def read_view
+      with_lock do
+        state = load_state
+        projection = begin
+          resume_projection(state, worktree: nil, offline: true)
+        rescue CoordinatorError => error
+          # A UI must still explain a paused mutation violation. This view grants no transitions;
+          # start/check/complete retain their normal checks.
+          {"current_candidate" => current_candidate(state), "terminal" => state.fetch("terminal"),
+           "runnable" => [], "blocked" => policy.fetch("nodes").keys.to_h { |node| [node, [error.message]] },
+           "validation_error" => error.message}
+        end
+        {"state" => state, "projection" => projection}
+      end
+    end
+
+    # The contract checks `complete` applies to a passing VERIFY, for a caller deciding pass or fail before
+    # it saves the evidence. Raises a ContractError where `complete` would refuse.
+    def validate_verification!(verification, worktree:)
+      with_lock { validate_verification(verification, load_state, worktree) }
+    end
+
+    # The contract checks `complete` applies to PLAN's outputs, for a caller deciding whether to save them.
+    # Raises a ContractError where `complete` would refuse.
+    def validate_plan!(implementation_plan, test_plan)
+      with_lock { validate_plan(implementation_plan, test_plan, load_state) }
     end
 
     private
@@ -597,10 +631,8 @@ module PrGraph
       errors = []
       errors << "--refresh is valid only for BOT-FEEDBACK" if refresh && node != "BOT-FEEDBACK"
       errors << "run is already terminal" if state.fetch("terminal")
-      if state.dig("failure_queue", "stopped")
-        stops = state.dig("failure_queue", "stops").map { |stop| stop["failure_id"] }.uniq
-        errors << "run stopped by recurring failure(s): #{stops.join(', ')}"
-      end
+      stop = recurring_failure_stop(state)
+      errors << stop if stop
       open_attempts = state.fetch("attempts").values.select { |attempt| attempt["state"] == "open" }
       errors << "#{node} already has an open attempt" if open_attempts.any? { |attempt| attempt["node"] == node }
       if node == writer_node
@@ -948,21 +980,14 @@ module PrGraph
           input_sha: repro.fetch("input_sha")
         )
       when "PLAN"
-        triage = current_artifacts(state, "triage_brief").first
-        error!("PLAN requires exactly one current triage_brief") unless triage
-        implementation = read_structured_artifact!(output_by_family!(outputs, "implementation_plan"))
-        test_plan = read_structured_artifact!(output_by_family!(outputs, "test_plan"))
-        @outcome_contract.validate_plan!(read_structured_artifact!(triage), implementation, test_plan)
-        if policy.fetch("nodes").key?("REPRODUCE") && !skipped_for_run?("REPRODUCE", state)
-          repro = current_artifacts(state, "repro_report")
-          error!("PLAN requires exactly one current repro_report") unless repro.one?
-          @repro_contract.validate_plan!(read_structured_artifact!(repro.first), implementation, test_plan)
-        end
+        validate_plan(
+          read_structured_artifact!(output_by_family!(outputs, "implementation_plan")),
+          read_structured_artifact!(output_by_family!(outputs, "test_plan")),
+          state
+        )
       when "VERIFY"
         if expected_pass
-          validate_ac_audit!(outputs, state)
-          validate_spec_audit!(outputs, state, worktree)
-          validate_regression!(outputs, state, worktree)
+          validate_verification(read_structured_artifact!(output_by_family!(outputs, "verification")), state, worktree)
         end
       when "PUBLISH"
         publish = output_by_family!(outputs, "publish_manifest")
@@ -984,24 +1009,49 @@ module PrGraph
       end
     end
 
-    def validate_ac_audit!(outputs, state)
+    def recurring_failure_stop(state)
+      return unless state.dig("failure_queue", "stopped")
+
+      stops = state.dig("failure_queue", "stops")
+      last = state.dig("failure_queue", "findings").find { |finding| finding["occurrence_id"] == stops.last["triggering_occurrence_id"] }
+      "run stopped by recurring failure(s): #{stops.map { |stop| stop['failure_id'] }.uniq.join(', ')}; last reason: #{last['reason']}"
+    end
+
+    def validate_plan(implementation, test_plan, state)
+      triage = current_artifacts(state, "triage_brief").first
+      error!("PLAN requires exactly one current triage_brief") unless triage
+      @outcome_contract.validate_plan!(read_structured_artifact!(triage), implementation, test_plan)
+      return if !policy.fetch("nodes").key?("REPRODUCE") || skipped_for_run?("REPRODUCE", state)
+
+      repro = current_artifacts(state, "repro_report")
+      error!("PLAN requires exactly one current repro_report") unless repro.one?
+      @repro_contract.validate_plan!(read_structured_artifact!(repro.first), implementation, test_plan)
+    end
+
+    def validate_verification(verification, state, worktree)
+      validate_ac_audit!(verification, state)
+      validate_spec_audit!(verification, state, worktree)
+      validate_regression!(verification, state, worktree)
+    end
+
+    def validate_ac_audit!(verification, state)
       triage = current_artifacts(state, "triage_brief")
       error!("VERIFY requires exactly one current triage_brief") unless triage.one?
       register = @outcome_contract.validate_register!(read_structured_artifact!(triage.first))
       @ac_audit_contract.validate!(
-        read_structured_artifact!(output_by_family!(outputs, "verification")),
+        verification,
         clause_ids: register.fetch("clause_ids"),
         candidate_sha: current_candidate!(state)
       )
     end
 
-    def validate_spec_audit!(outputs, state, worktree)
+    def validate_spec_audit!(verification, state, worktree)
       error!("VERIFY spec_audit needs the attempt's worktree") unless worktree
       base = spec_audit_base(state)
       error!("VERIFY spec_audit needs a current repro_report or worktree_manifest to derive the base") unless base
       candidate = current_candidate!(state)
       @spec_audit_contract.validate!(
-        read_structured_artifact!(output_by_family!(outputs, "verification")),
+        verification,
         candidate_sha: candidate, base_sha: base,
         spec_paths: SpecAuditContract.changed_spec_paths(worktree, base, candidate)
       )
@@ -1017,7 +1067,7 @@ module PrGraph
       worktree.first["input_sha"] if worktree.one?
     end
 
-    def validate_regression!(outputs, state, worktree)
+    def validate_regression!(verification, state, worktree)
       return unless policy.fetch("nodes").key?("REPRODUCE") && !skipped_for_run?("REPRODUCE", state)
 
       repro = current_artifacts(state, "repro_report")
@@ -1029,7 +1079,7 @@ module PrGraph
       changed = git_capture(worktree, "diff", "--name-only", report.fetch("base_sha"), candidate).split("\n")
       @repro_contract.validate_regression!(
         report,
-        read_structured_artifact!(output_by_family!(outputs, "verification")),
+        verification,
         candidate_sha: candidate,
         changed_paths: changed
       )

@@ -1,0 +1,70 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "optparse"
+require "json"
+require_relative "../lib/giraffe/harness"
+require_relative "../lib/giraffe/tickets"
+require_relative "../lib/giraffe/graph_view"
+
+begin
+  command = ARGV.shift
+  ARGV.unshift(command) if %w[-h --help].include?(command)
+  options = {}
+  parser = OptionParser.new do |opts|
+    opts.banner = "Usage: giraffe start TICKET --config FILE [--ticket-file FILE] [--dry-run]\n       giraffe status|graph|events|harness|resume|sync|cancel RUN.jsonl\n       giraffe answer RUN.jsonl QUESTION_ID ANSWER\n       giraffe restore RUN_ID --context REF --ticket ID --destination DIR"
+    opts.on("--after SEQ", Integer) { |value| options[:after] = value }
+    opts.on("--config FILE") { |value| options[:config] = value }
+    opts.on("--ticket-file FILE") { |value| options[:ticket_file] = value }
+    opts.on("--dry-run") { options[:dry_run] = true }
+    opts.on("--context REF") { |value| options[:context] = value }
+    opts.on("--ticket ID") { |value| options[:ticket] = value }
+    opts.on("--destination DIR") { |value| options[:destination] = value }
+    opts.on("-h", "--help") { puts opts; exit }
+  end
+  parser.parse!(ARGV)
+  output = case command
+           when "start"
+             config = Giraffe::Config.load(options[:config], overrides: options[:dry_run] ? {"dry_run" => true} : {})
+             ticket = Giraffe::Tickets.load(identifier: ARGV.shift, file: options[:ticket_file])
+             if config["dry_run"]
+               {"status" => "dry_run", "ticket" => ticket["id"], "repo" => config["repo"], "base" => config["base"],
+                "steps" => Giraffe::Harness::ORDER, "checks" => config["checks"]}
+             else
+               run = Giraffe::Run.start(config, ticket)
+               Giraffe::Harness.new(run).run
+               {"path" => run.path, "status" => run.state["status"], "questions" => run.state["questions"], "sync" => run.store.sync_status}
+             end
+           when "status", "resume", "harness", "answer", "cancel", "sync", "graph", "events"
+             run = Giraffe::Run.load(ARGV.shift || raise(Giraffe::Error, "run path is required"))
+             case command
+             when "resume", "harness" then Giraffe::Harness.new(run).run
+             when "answer"
+               run.answer(ARGV.shift, ARGV.join(" "))
+               run.sync
+             when "cancel" then run.cancel
+             when "sync" then run.lock { run.sync }
+             end
+             view = Giraffe::GraphView.new(run)
+             case command
+             when "graph" then view.snapshot
+             when "events" then view.events(after: options.fetch(:after, 0))
+             else
+               graph = view.snapshot
+               {"path" => run.path, "status" => run.state["status"], "questions" => run.state["questions"], "error" => run.state["error"],
+                "cancel_requested" => run.cancel_requested?, "graph" => graph, "sync" => graph["storage"]}
+             end
+           when "restore"
+             id = ARGV.shift || raise(Giraffe::Error, "run ID is required")
+             %i[context ticket destination].each { |key| raise Giraffe::Error, "--#{key} is required" unless options[key] }
+             path, state = Giraffe::Run.restore(id, **options.slice(:context, :ticket, :destination))
+             {"path" => path, "status" => "restored", "revision" => state["revision"], "note" => "Repository and worktree paths must still exist; cross-host relocation is not implemented."}
+           else
+             puts parser
+             exit(command ? 1 : 0)
+           end
+  puts JSON.pretty_generate(output)
+rescue StandardError => error
+  warn JSON.generate({"path" => run&.path, "error" => error.message}.compact)
+  exit 1
+end
