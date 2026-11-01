@@ -1128,7 +1128,8 @@ class HarnessTest < Minitest::Test
     first = copy(data["audit"][0])
     first["clauses"][0] = {"clause_id" => clauses[0], "verdict" => "unmet", "reason" => "Greeting needs another adjustment"}
     data["audit"] = [first, data["audit"][0]]
-    data["build"] << {"output" => {"questions" => [], "summary" => "Addressed acceptance finding"}}
+    fixed = data["build"][0]["writes"].fetch("app.rb")
+    data["build"] << {"output" => {"questions" => [], "summary" => "Addressed acceptance finding"}, "writes" => {"app.rb" => "#{fixed.chomp}\n# adjusted\n"}}
     data["review"] << data["review"][0]
     data["spec_audit"] << data["spec_audit"][0]
     run = start_bug
