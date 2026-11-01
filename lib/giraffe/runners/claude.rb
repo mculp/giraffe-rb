@@ -3,7 +3,6 @@
 require "json"
 require "rubygems/version"
 require_relative "../command"
-require_relative "../schema"
 
 module Giraffe
   module Runners
@@ -16,7 +15,6 @@ module Giraffe
 
       def call(step:, prompt:, schema:, cwd:, writable: false, budget_usd:, **)
         check_version!(cwd) unless @checked
-        Schema.check!(schema)
         # No shell, remote connector, subagent or publishing tools in any model call.
         tools = %w[Read Grep Glob]
         tools += %w[Edit Write] if writable
@@ -31,7 +29,7 @@ module Giraffe
                 "--disable-slash-commands", "--no-session-persistence", "--max-turns", @config["max_turns"].to_s,
                 "--max-budget-usd", budget_usd.to_s, "--model", (@config["models"] || {}).fetch(step, @config["model"])]
         # Input travels over stdin, never in process arguments. Only model authentication is inherited.
-        env = ENV.to_h.select { |key, _| %w[PATH HOME TMPDIR LANG LC_ALL USER ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN].include?(key) }
+        env = ENV.slice(*Command::BASE_ENV, "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")
         env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
         result = @command.capture(argv, cwd: cwd, env: env, clean_env: true, input: prompt,
                                   timeout: @config["call_timeout"])
@@ -39,14 +37,8 @@ module Giraffe
         usage = {"cost_usd" => doc.fetch("total_cost_usd", 0.0), "turns" => doc.fetch("num_turns", 0)}
         unless result["status"].zero? && doc["type"] == "result" && doc["subtype"] == "success" && !doc["is_error"] && doc.key?("structured_output")
           error = Error.new("Claude #{step} did not return a successful structured result (#{doc['subtype'] || result['status']})")
-          error.define_singleton_method(:usage) { usage }
+          error.usage = usage
           raise error
-        end
-        begin
-          Schema.validate!(schema, doc["structured_output"])
-        rescue InvalidOutput => error
-          error.define_singleton_method(:usage) { usage }
-          raise
         end
         {"output" => doc["structured_output"], "usage" => usage}
       rescue JSON::ParserError

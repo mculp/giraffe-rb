@@ -6,7 +6,7 @@ module Giraffe
   # The deliberately small JSON Schema dialect used by the checked-in runner schemas.
   # Unknown keywords fail at load time; this is not a general draft-2020-12 implementation.
   module Schema
-    KEYWORDS = %w[type properties required additionalProperties items minItems maxItems minLength maxLength enum const minimum maximum oneOf anyOf pattern description title $schema].freeze
+    KEYWORDS = %w[type properties required additionalProperties items minItems maxItems minLength enum const minimum maximum oneOf].freeze
     module_function
 
     def check!(schema)
@@ -15,7 +15,7 @@ module Giraffe
       raise InvalidOutput, "unsupported schema keyword: #{unknown.join(', ')}" unless unknown.empty?
       schema.fetch("properties", {}).each_value { |child| check!(child) }
       check!(schema["items"]) if schema["items"]
-      %w[oneOf anyOf].each { |key| schema.fetch(key, []).each { |child| check!(child) } }
+      schema.fetch("oneOf", []).each { |child| check!(child) }
       schema
     end
 
@@ -31,11 +31,7 @@ module Giraffe
       found = []
       found << "#{path} must equal #{schema['const'].inspect}" if schema.key?("const") && value != schema["const"]
       found << "#{path} is outside its enum" if schema["enum"] && !schema["enum"].include?(value)
-      %w[oneOf anyOf].each do |key|
-        next unless schema[key]
-        matches = schema[key].count { |branch| errors(branch, value, path).empty? }
-        found << "#{path} must match #{key}" unless key == "oneOf" ? matches == 1 : matches.positive?
-      end
+      found << "#{path} must match oneOf" if schema["oneOf"] && schema["oneOf"].count { |branch| errors(branch, value, path).empty? } != 1
       if value.is_a?(Hash)
         schema.fetch("required", []).each { |key| found << "#{path}.#{key} is required" unless value.key?(key) }
         properties = schema.fetch("properties", {})
@@ -52,8 +48,6 @@ module Giraffe
         value.each_with_index { |inner, index| found.concat(errors(schema["items"], inner, "#{path}[#{index}]")) } if schema["items"]
       elsif value.is_a?(String)
         found << "#{path} is too short" if schema["minLength"] && value.length < schema["minLength"]
-        found << "#{path} is too long" if schema["maxLength"] && value.length > schema["maxLength"]
-        found << "#{path} does not match its pattern" if schema["pattern"] && !Regexp.new(schema["pattern"]).match?(value)
       elsif value.is_a?(Numeric)
         found << "#{path} is below minimum" if schema["minimum"] && value < schema["minimum"]
         found << "#{path} is above maximum" if schema["maximum"] && value > schema["maximum"]
@@ -67,9 +61,7 @@ module Giraffe
       when "array" then value.is_a?(Array)
       when "string" then value.is_a?(String)
       when "integer" then value.is_a?(Integer)
-      when "number" then value.is_a?(Numeric) && value.finite?
       when "boolean" then value == true || value == false
-      when "null" then value.nil?
       else raise InvalidOutput, "unsupported schema type: #{type}"
       end
     end

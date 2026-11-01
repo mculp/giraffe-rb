@@ -17,8 +17,7 @@ module Giraffe
           finish(pr: number, candidate_sha: candidate)
           return
         end
-        body = ask("pr_body", {"ticket" => @run.state["ticket"], "diff" => @git.diff(worktree, base_sha),
-                               "verification" => artifact("verification"), "ui_proof_pending" => runtime["ui"]})
+        body = ask("pr_body", {"diff" => @git.diff(worktree, base_sha), "verification" => artifact("verification"), "ui_proof_pending" => runtime["ui"]})
         file = File.join(@run.directory, "pr-body.md")
         File.write(file, body.fetch("body"), mode: "w", perm: 0o600)
         branch = artifact("worktree_manifest").fetch("branch")

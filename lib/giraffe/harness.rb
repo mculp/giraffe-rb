@@ -1,7 +1,6 @@
 # frozen_string_literal: true
 
 require "json"
-require "digest"
 require_relative "run"
 require_relative "git"
 require_relative "checks"
@@ -23,17 +22,17 @@ module Giraffe
     include Steps::Publish
     ORDER = %w[TRIAGE WORKTREE INVESTIGATE REPRODUCE PLAN BUILD VERIFY PUBLISH].freeze
 
-    def initialize(run, runner: nil, git: nil, checks: nil, github: nil)
+    def initialize(run, runner: nil, checks: nil, github: nil)
       @run = run
-      @command = Command.new(cancelled: -> { File.exist?(File.join(run.directory, "cancel.request")) })
-      @git = git || Git.new(command: @command)
-      @checks = checks || Checks.new(run.config, command: @command)
+      command = Command.new(cancelled: -> { run.cancel_requested? })
+      @git = Git.new(command: command)
+      @checks = checks || Checks.new(run.config, command: command)
       @github = github || PrGraph::GitHubPrCi.new
       runner ||= if run.config["runner"] == "scripted"
                    Runners::Scripted.new(run.config["script"], positions: runtime.fetch("script_positions", {}),
                                         on_advance: ->(positions) { checkpoint("script_positions", positions) })
                  else
-                   Runners::Claude.new(run.config, command: @command)
+                   Runners::Claude.new(run.config, command: command)
                  end
       @model = Model.new(run, runner, git: @git)
     end
@@ -46,34 +45,24 @@ module Giraffe
         @run.update(status: "running", error: nil)
         loop do
           raise Cancelled, "run cancelled" if cancelled?
-          projection = @run.coordinator.check(offline: true)
-          replay_results(projection)
-          projection = @run.coordinator.check(offline: true)
-          if completed?("PUBLISH")
+          projection = replayed_projection
+          if state["published"]
             @run.update(status: "draft_pr")
             break
           end
           open = projection["open_attempts"].find { |attempt| ORDER.include?(attempt["node"]) }
           node = open ? open["node"] : ORDER.find { |name| projection["runnable"].include?(name) }
           raise Error, "no supported runnable step; inspect coordinator status" unless node
-          # Dry run is a persisted planning stop. Resuming it never enters WORKTREE or BUILD.
-          if @run.config["dry_run"] && node == "WORKTREE"
-            @run.update(status: "dry_run")
-            break
-          end
-          if protected?(node) && !(open && node == "BUILD") && projection["current_candidate"] && @git.head(worktree) != projection["current_candidate"]
-            raise Error, "worktree HEAD differs from the graph's current candidate"
-          end
           attempt = open || @run.coordinator.start(node, worktree: protected?(node) ? worktree : nil)
           @attempt = attempt.fetch("attempt_id")
           @node = node
           send("step_#{node.downcase}")
+          # Also moves the revision on, so this boundary's checkpoint is the one hydrate and restore pick.
           checkpoint("last_step", node)
           @run.sync
         end
       rescue Parked
         # The step remains open; an answer creates a fresh model call with that answer as input.
-        @run.state
       rescue Cancelled => error
         @run.update(status: "cancelled", error: error.message)
       rescue StandardError => error
@@ -88,14 +77,15 @@ module Giraffe
     private
 
     def protected?(node) = @run.coordinator.policy.dig("nodes", node, "mutation_guard")
-    def cancelled? = @run.state["status"] == "cancelled" || File.exist?(File.join(@run.directory, "cancel.request"))
+    def cancelled? = @run.state["status"] == "cancelled" || @run.cancel_requested?
     def state = @run.coordinator.snapshot
     def runtime = @run.state.fetch("runtime")
-    def checkpoint(key, value) = @run.update(runtime: runtime.merge(key => value))
-    def completed?(node) = state["attempts"].values.any? { |attempt| attempt["node"] == node && attempt["state"] == "closed" && state.dig("manifests", attempt["attempt_id"], "result", "state") == "completed" }
+    def checkpoint(key, value) = @run.checkpoint(key, value)
     def worktree = File.join(@run.directory, "worktree")
-    def base_sha = runtime.fetch("base_sha") { @git.call(@run.config["repo"], "rev-parse", "--verify", "#{@run.config['base']}^{commit}") }
-    def clause_ids = PrGraph::OutcomeContract.new.validate_register!(artifact("triage_brief")).fetch("clause_ids")
+    def base_sha = runtime.fetch("base_sha") { @git.resolve_commit(@run.config["repo"], @run.config["base"]) }
+    def clause_ids = state.dig("outcome_context", "clauses")
+    def outcome_contract = @outcome_contract ||= PrGraph::OutcomeContract.new
+    def read_only_checks(commands = @run.config["checks"]) = @git.read_only(worktree) { @checks.run(worktree, commands) }
 
     def artifact_record(family)
       records = state.fetch("artifacts").select { |row| row["family"] == family && row["status"] == "current" }
@@ -103,42 +93,43 @@ module Giraffe
       records.first
     end
 
-    def artifact(family)
-      record = artifact_record(family)
-      JSON.parse(File.read(File.join(@run.directory, record.fetch("content_ref"))))
-    end
+    def evidence(record) = outcome_contract.read_artifact!(record, artifact_path: @run.path)
+    def artifact(family) = evidence(artifact_record(family))
+    def attempted_record(family) = state["artifacts"].find { |row| row["family"] == family && row["attempt_id"] == @attempt }
 
     def attempted_artifact(family)
-      record = state["artifacts"].find { |row| row["family"] == family && row["attempt_id"] == @attempt }
-      record && JSON.parse(File.read(File.join(@run.directory, record.fetch("content_ref"))))
+      record = attempted_record(family)
+      record && evidence(record)
     end
 
-    def put(family, content, candidate: nil, input: nil, perspective: "author", covered: [])
-      existing = state["artifacts"].find { |row| row["family"] == family && row["attempt_id"] == @attempt }
+    def put(family, content, candidate: nil, perspective: "author", covered: [])
+      existing = attempted_record(family)
       if existing
-        stored = JSON.parse(File.read(File.join(@run.directory, existing.fetch("content_ref"))))
-        raise Error, "recovery would replace #{family} with different evidence" unless stored == content && existing["candidate_sha"] == candidate
+        raise Error, "recovery would replace #{family} with different evidence" unless evidence(existing) == content && existing["candidate_sha"] == candidate
         return existing
       end
       @run.coordinator.put_artifact({
           "family" => family, "node" => @node, "attempt_id" => @attempt, "producer" => "giraffe-harness",
-          "input_sha" => input || candidate || base_sha, "candidate_sha" => candidate, "content_type" => "application/json",
+          "input_sha" => candidate || base_sha, "candidate_sha" => candidate, "content_type" => "application/json",
           "wake_id" => nil, "perspective" => perspective, "covered_outcomes" => covered}, JSON.generate(content))
     end
 
     def finish(**options) = @run.coordinator.complete(@node, @attempt, **options)
 
     def ask(role, inputs, cwd: worktree, writable: false, unit: "main")
-      @model.call(role, attempt: @attempt, inputs: inputs, cwd: cwd, writable: writable, unit: unit)
+      @model.call(role, attempt: @attempt, inputs: {"ticket" => @run.state["ticket"]}.merge(inputs), cwd: cwd, writable: writable, unit: unit)
     end
 
-    def replay_results(projection)
-      projection.dig("recovery", "partial_results").each do |result|
+    # The graph after finishing any result a crash left half recorded.
+    def replayed_projection
+      projection = @run.coordinator.check(offline: true)
+      partial = projection.dig("recovery", "partial_results")
+      return projection if partial.empty?
+      partial.each do |result|
         arguments = result.fetch("retry")
-        command = arguments.fetch("command")
-        options = arguments.reject { |key, _| key == "command" }.transform_keys(&:to_sym)
-        @run.coordinator.public_send(command, result.fetch("node"), result.fetch("attempt_id"), **options)
+        @run.coordinator.public_send(arguments.fetch("command"), result.fetch("node"), result.fetch("attempt_id"), **arguments.except("command").transform_keys(&:to_sym))
       end
+      @run.coordinator.check(offline: true)
     end
   end
 end

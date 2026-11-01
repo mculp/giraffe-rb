@@ -7,6 +7,7 @@ require "open3"
 require "time"
 require "uri"
 require_relative "pr_ci_contract"
+require_relative "process_group"
 
 module PrGraph
   class CommandRunner
@@ -22,7 +23,7 @@ module PrGraph
       out_reader = Thread.new { stdout.read }
       err_reader = Thread.new { stderr.read }
       unless waiter.join(@timeout_seconds)
-        terminate(waiter.pid)
+        ProcessGroup.terminate(waiter.pid)
         raise CommandError, "command timed out after #{@timeout_seconds}s: #{command.take(3).join(' ')}"
       end
       output = out_reader.value
@@ -34,16 +35,6 @@ module PrGraph
     ensure
       stdout&.close
       stderr&.close
-    end
-
-    private
-
-    def terminate(pid)
-      Process.kill("TERM", -pid)
-      sleep 0.05
-      Process.kill("KILL", -pid)
-    rescue Errno::ESRCH
-      nil
     end
   end
 

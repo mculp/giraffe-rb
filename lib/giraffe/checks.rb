@@ -2,23 +2,25 @@
 
 require "rbconfig"
 require "tmpdir"
-require "etc"
 require_relative "command"
 
 module Giraffe
   class Checks
+    # Do not pass controller/model/GitHub/Linear/Temper credentials to target-repo code.
+    ENV_ALLOWED = [*Command::BASE_ENV, "SHELL", "GEM_HOME", "GEM_PATH", "BUNDLE_PATH"].freeze
+
     def initialize(config, command: Command.new)
       @config, @command = config, command
     end
 
     def run(cwd, commands = @config["checks"])
+      env = ENV.slice(*ENV_ALLOWED).merge("CI" => "1")
       commands.map do |argv|
         actual = @config["sandbox_checks"] ? sandbox(cwd, argv) : argv
-        # Do not pass controller/model/GitHub/Linear/Temper credentials to target-repo code.
-        env = ENV.to_h.select { |key, _| %w[PATH HOME TMPDIR LANG LC_ALL USER SHELL GEM_HOME GEM_PATH BUNDLE_PATH].include?(key) }
-        env["CI"] = "1"
         result = @command.capture(actual, cwd: cwd, env: env, clean_env: true, timeout: @config["check_timeout"])
-        {"command" => argv, "exit_code" => result["status"], "excerpt" => (result["stdout"] + result["stderr"]).byteslice(-12_000, 12_000) || (result["stdout"] + result["stderr"])}
+        output = result["stdout"] + result["stderr"]
+        # A byte offset can land inside a character, which the journals could not then encode as JSON.
+        {"command" => argv, "exit_code" => result["status"], "excerpt" => (output.byteslice(-12_000, 12_000) || output).scrub}
       end
     end
 

@@ -45,27 +45,23 @@ module Giraffe
         @git.unchanged!(cwd, before)
       end
       usage = result.fetch("usage")
-      cost = usage.fetch("cost_usd")
-      raise InvalidOutput, "runner returned an invalid cost" unless cost.is_a?(Numeric) && cost.finite? && cost >= 0
+      raise InvalidOutput, "runner returned an invalid cost" unless billable?(usage.fetch("cost_usd"))
+      # Billed before validating: an invalid result still cost what it reported.
+      record(reservation, {"role" => role, "charge" => usage["cost_usd"], "state" => "finished", "usage" => usage})
       Schema.validate!(schema, result.fetch("output"))
-      record(reservation, {"role" => role, "charge" => cost, "state" => "finished", "usage" => usage})
       record(key, {"role" => role, "charge" => 0.0, "output" => result["output"]})
       questions!(result["output"], role, attempt, key)
-    rescue StandardError => error
-      if reservation && error.respond_to?(:usage)
-        usage = error.usage
-        cost = usage["cost_usd"]
-        record(reservation, {"role" => role, "charge" => cost, "state" => "failed", "usage" => usage}) if cost.is_a?(Numeric) && cost.finite? && cost >= 0
-      end
+    rescue Error => error
+      usage = error.usage
+      record(reservation, {"role" => role, "charge" => usage["cost_usd"], "state" => "failed", "usage" => usage}) if reservation && usage && billable?(usage["cost_usd"])
       raise
     end
 
     private
 
-    def record(key, value)
-      runtime = @run.state.fetch("runtime")
-      @run.update(runtime: runtime.merge("calls" => runtime.fetch("calls", {}).merge(key => value)))
-    end
+    def billable?(cost) = cost.is_a?(Numeric) && cost.finite? && cost >= 0
+
+    def record(key, value) = @run.checkpoint_entry("calls", key, value)
 
     def questions!(output, role, attempt, key)
       return output if output.fetch("questions").empty?

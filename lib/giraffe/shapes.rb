@@ -18,6 +18,9 @@ module PrGraph
     FAILURE_LOG = "giraffe-run-failure-log"
     MANIFEST = "giraffe-run-manifest"
     HARNESS = "giraffe-harness-state"
+    # A live run's current status for remote readers, beside the full-state checkpoints under HARNESS.
+    HARNESS_LIVE = "giraffe-harness-live"
+    HARNESS_LIVE_FIELDS = %w[version run_id revision status questions error].freeze
     DIALECT = "https://json-schema.org/draft/2020-12/schema"
     # JSON Schema keeps these as patterns. They stay inside the dialect Temper and Ruby share: no \d, no
     # inline flags, and a case-insensitive class spelled out.
@@ -72,11 +75,10 @@ module PrGraph
                            "error" => {"type" => ["string", "null"]}, "runtime" => {"type" => "object"}})
       }
       families.each do |family|
-        family_record = Marshal.load(Marshal.dump(record))
-        family_record["properties"]["family"] = {"const" => family}
+        family_record = record.merge("properties" => record.fetch("properties").merge("family" => {"const" => family}))
         kinds[family_kind(family)] = object({"record" => family_record, "content" => {"type" => "string"}})
       end
-      kinds["giraffe-harness-live"] = kinds.fetch(HARNESS)
+      kinds[HARNESS_LIVE] = object(kinds.fetch(HARNESS).fetch("properties").slice(*HARNESS_LIVE_FIELDS))
       kinds.transform_values do |schema|
         {"$schema" => DIALECT, "title" => "giraffe run store #{Digest::SHA256.hexdigest(JSON.generate(schema))[0, 16]}"}.merge(schema)
       end

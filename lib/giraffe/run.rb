@@ -4,86 +4,96 @@ require "json"
 require "fileutils"
 require "securerandom"
 require "time"
-require_relative "../../scripts/temper_cli"
 require_relative "store"
 require_relative "local_store"
 require_relative "config"
 
 module Giraffe
   class Run
-    KIND = "giraffe-harness-state"
     attr_reader :path, :store, :state
 
-    def self.start(config, ticket, cli: PrGraph::TemperCli.new)
+    def self.start(config, ticket)
       id = SecureRandom.uuid
       path = File.join(config["runs_dir"], id, "run.jsonl")
       FileUtils.mkdir_p(File.dirname(path), mode: 0o700)
-      store = LocalStore.new(path: path, context: config["context"], run_id: id, ticket: ticket.fetch("id"), mirror: config["store"] == "mirrored", cli: cli)
-      run = new(path, store)
-      run.instance_variable_set(:@state, {"version" => 1, "run_id" => id, "session" => "giraffe-#{id}", "revision" => 0,
-                                         "config" => config.data, "ticket" => ticket, "status" => "running", "questions" => [],
-                                         "answers" => {}, "runtime" => {}, "created_at" => Time.now.utc.iso8601(6), "error" => nil})
+      state = {"version" => 1, "run_id" => id, "session" => "giraffe-#{id}", "revision" => 0,
+               "config" => config.data, "ticket" => ticket, "status" => "running", "questions" => [],
+               "answers" => {}, "runtime" => {}, "created_at" => Time.now.utc.iso8601(6), "error" => nil}
+      run = new(path, store_for(path, state), state)
       run.save!
-      store.event_log.emit(path, run_id: id, session: run.state["session"], payload: {"e" => "run_start", "entry" => "ticket", "ticket" => ticket.fetch("id")})
+      run.store.event_log.emit(path, run_id: id, session: state["session"], payload: {"e" => "run_start", "entry" => "ticket", "ticket" => ticket.fetch("id")})
       run
     end
 
-    def self.load(path, cli: PrGraph::TemperCli.new)
+    def self.load(path)
       path = File.expand_path(path)
       raise Error, "run path must end in .jsonl" unless path.end_with?(".jsonl")
-      cached = File.open(path.sub(/\.jsonl\z/, ".state.jsonl")) do |file|
-        file.flock(File::LOCK_SH)
-        file.each_line.map { |line| JSON.parse(line) }.last
-      end
-      raise Error, "local state journal is empty" unless cached
-      store = LocalStore.new(path: path, context: cached.dig("config", "context"), run_id: cached.fetch("run_id"), ticket: cached.dig("ticket", "id"), mirror: cached.dig("config", "store") == "mirrored", cli: cli)
-      run = new(path, store)
-      run.reload!
-      run
-    rescue JSON::ParserError, KeyError => e
+      latest = LocalStore.read_states(path).last
+      raise Error, "local state journal is empty" unless latest
+      new(path, store_for(path, latest)).reload!
+    rescue KeyError => e
       raise Error, "invalid run locator: #{e.message}"
     end
 
-    def initialize(path, store)
-      @path, @store = File.expand_path(path), store
+    # Installs a run's last fully synced checkpoint under `destination`. Returns its path and state.
+    def self.restore(id, context:, ticket:, destination:)
+      raise Error, "invalid run ID" unless id.match?(PrGraph::EventLog::UUID)
+      destination = File.expand_path(destination)
+      raise Error, "restore destination must be empty" if File.exist?(destination) && Dir.children(destination).any?
+      remote = PrGraph::Store.new(context: context, run_id: id, ticket: ticket)
+      state = remote.latest_checkpoint || raise(Error, "no fully synced checkpoint")
+      raise Error, "checkpoint identity mismatch" unless state["run_id"] == id && state.dig("config", "context") == context
+      FileUtils.mkdir_p(destination, mode: 0o700)
+      path = File.join(destination, "run.jsonl")
+      remote.hydrate(path)
+      LocalStore.new(path: path, run_id: id, context: context, ticket: ticket, mirror: false).append_state(state)
+      [path, state]
+    end
+
+    def self.store_for(path, state)
+      LocalStore.new(path: path, context: state.dig("config", "context"), run_id: state.fetch("run_id"), ticket: state.dig("ticket", "id"), mirror: state.dig("config", "store") == "mirrored")
+    end
+    private_class_method :store_for
+
+    def initialize(path, store, state = nil)
+      @path, @store, @state = File.expand_path(path), store, state
     end
 
     def reload!
-      records = store.read_records(KIND)
+      records = store.read_states
       raise Error, "local journal holds no harness state for #{store.run_id}" if records.empty?
       revisions = records.group_by { |row| row.fetch("revision") }
-      revisions.each_value do |rows|
-        raise Error, "conflicting harness state revisions" unless rows.map { |row| canonical(row) }.uniq.length == 1
-      end
+      raise Error, "conflicting harness state revisions" unless revisions.each_value.all? { |rows| rows.uniq.one? }
       @state = revisions.max_by { |revision, _| revision }.last.first
       raise Error, "harness state identity mismatch" unless state["version"] == 1 && state["run_id"] == store.run_id
-      Config.new(state.fetch("config"), resolved: true)
-      cache!
+      @config = Config.new(state.fetch("config"), resolved: true)
       self
     end
 
     def sync = store.sync(state)
 
-    def config = Config.new(state.fetch("config"), resolved: true)
+    def config = @config ||= Config.new(state.fetch("config"), resolved: true)
     def id = state.fetch("run_id")
     def directory = File.dirname(path)
-    def coordinator = @coordinator ||= store.coordinator(execution_path: path, session: state.fetch("session"))
+    def coordinator = @coordinator ||= store.coordinator(session: state.fetch("session"))
     def events = store.event_log.read(path)
 
     def save!(proposed = state)
       next_state = proposed.merge("revision" => state.fetch("revision") + 1)
-      store.commit(kind: KIND, content: next_state, precedence: next_state["revision"], correlation: id)
+      store.append_state(next_state)
       @state = next_state
-      cache!
     end
 
     def update(**fields)
       save!(state.merge(fields.transform_keys(&:to_s)))
     end
 
+    def checkpoint(key, value) = update(runtime: state.fetch("runtime").merge(key => value))
+    def checkpoint_entry(section, key, value) = checkpoint(section, state.fetch("runtime").fetch(section, {}).merge(key => value))
+
     def lock
       File.open(File.join(directory, "harness.lock"), File::RDWR | File::CREAT, 0o600) do |lock|
-        raise Error, "this run already has an active harness" unless lock.flock(File::LOCK_EX | File::LOCK_NB)
+        raise RunLocked, "this run already has an active harness" unless lock.flock(File::LOCK_EX | File::LOCK_NB)
         reload!
         yield
       end
@@ -99,23 +109,18 @@ module Giraffe
       end
     end
 
+    def cancel_requested? = File.exist?(cancel_path)
+
+    # An active harness sees the request and stops itself; an idle run is marked here.
+    def cancel
+      File.write(cancel_path, "cancel\n", mode: "w", perm: 0o600)
+      lock { update(status: "cancelled", error: "Cancellation requested by the operator") }
+    rescue RunLocked
+      nil
+    end
+
     private
 
-    def cache!
-      target = path.sub(/\.jsonl\z/, ".harness.json")
-      temporary = "#{target}.#{SecureRandom.hex(4)}.tmp"
-      File.open(temporary, File::WRONLY | File::CREAT | File::EXCL, 0o600) { |file| file.write(JSON.pretty_generate(state)); file.flush; file.fsync }
-      File.rename(temporary, target)
-    ensure
-      File.unlink(temporary) if temporary && File.file?(temporary)
-    end
-
-    def canonical(value)
-      case value
-      when Hash then value.sort.to_h.transform_values { |inner| canonical(inner) }
-      when Array then value.map { |inner| canonical(inner) }
-      else value
-      end
-    end
+    def cancel_path = File.join(directory, "cancel.request")
   end
 end

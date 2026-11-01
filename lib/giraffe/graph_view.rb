@@ -20,23 +20,7 @@ module Giraffe
       version = Digest::SHA256.hexdigest(JSON.generate(definition))
       nodes = policy.fetch("nodes").map do |name, rules|
         attempts = state["attempts"].values.select { |attempt| attempt["node"] == name }.sort_by { |attempt| attempt["start_seq"] }
-        current = attempts.last
-        status = if current && current["state"] == "open"
-                   if %w[paused cancelled].include?(@run.state["status"])
-                     @run.state["status"]
-                   else
-                     @run.state["questions"].any? { |q| q["attempt_id"] == current["attempt_id"] } ? "waiting_for_answers" : "active"
-                   end
-                 elsif projection["runnable"].include?(name)
-                   "runnable"
-                 elsif current
-                   %w[failed mutation_violation].include?(state.dig("manifests", current["attempt_id"], "result", "state")) ? "failed" : "completed"
-                 elsif rules["retired"]
-                   "retired"
-                 else
-                   "blocked"
-                 end
-        {"id" => name, "status" => status, "dependencies" => graph.fetch("dependencies").fetch(name),
+        {"id" => name, "status" => node_status(name, rules, attempts.last, state, projection), "dependencies" => graph.fetch("dependencies").fetch(name),
          "attempts" => attempts.map { |attempt| attempt.slice("attempt_id", "iteration", "state", "start_seq", "done_seq") },
          "blocked_reasons" => projection["blocked"][name] || [],
          "artifacts" => state["artifacts"].select { |artifact| artifact["node"] == name }.map do |artifact|
@@ -47,7 +31,7 @@ module Giraffe
        "status" => @run.state["status"], "graph_version" => version, "definition" => definition,
        "candidate_sha" => projection["current_candidate"], "terminal" => projection["terminal"], "nodes" => nodes,
        "validation_error" => projection["validation_error"],
-       "questions" => @run.state["questions"], "error" => @run.state["error"], "storage" => storage_status,
+       "questions" => @run.state["questions"], "error" => @run.state["error"], "storage" => @run.store.sync_status,
        "commands" => %w[answer resume cancel sync], "graph_editing" => false}
     end
 
@@ -61,9 +45,14 @@ module Giraffe
 
     private
 
-    def storage_status
-      path = @run.path.sub(/\.jsonl\z/, ".sync.json")
-      File.exist?(path) ? JSON.parse(File.read(path)) : {"mode" => @run.config["store"], "synced" => false}
+    def node_status(name, rules, current, state, projection)
+      if current && current["state"] == "open"
+        return @run.state["status"] if %w[paused cancelled].include?(@run.state["status"])
+        return @run.state["questions"].any? { |q| q["attempt_id"] == current["attempt_id"] } ? "waiting_for_answers" : "active"
+      end
+      return "runnable" if projection["runnable"].include?(name)
+      return %w[failed mutation_violation].include?(state.dig("manifests", current["attempt_id"], "result", "state")) ? "failed" : "completed" if current
+      rules["retired"] ? "retired" : "blocked"
     end
   end
 end

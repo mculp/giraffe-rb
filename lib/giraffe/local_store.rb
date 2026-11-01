@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "digest"
+require_relative "errors"
 require_relative "store"
 
 module Giraffe
@@ -9,36 +10,11 @@ module Giraffe
   class LocalStore
     attr_reader :path, :run_id, :context
 
-    def initialize(path:, run_id:, context: nil, ticket:, mirror: true, cli: PrGraph::TemperCli.new)
-      @path, @run_id, @context, @ticket, @mirror, @cli = path, run_id, context, ticket, mirror, cli
-    end
+    # A run's file beside its event log, named by `suffix` in place of the log's extension.
+    def self.sibling(path, suffix) = path.sub(/\.jsonl\z/, suffix)
 
-    def event_log = @event_log ||= LiveEventLog.new(self)
-    def artifact_log = @artifact_log ||= LiveArtifactLog.new(self, execution_log: event_log)
-    def failure_log = @failure_log ||= LiveFailureLog.new(self, execution_log: event_log)
-    def coordinator(execution_path:, session:)
-      LiveCoordinator.new(self, execution_path: execution_path, run_id: run_id, session: session,
-                              event_log: event_log, artifact_log: artifact_log, failure_log: failure_log)
-    end
-
-    def commit(kind:, content:, **)
-      raise Error, "unsupported local record kind #{kind}" unless kind == PrGraph::Shapes::HARNESS
-      json = JSON.generate(content)
-      raise Error, "state was not stored: #{reason}" if (reason = PrGraph::ContentScan.violation(content, json))
-      target = path.sub(/\.jsonl\z/, ".state.jsonl")
-      File.open(target, File::WRONLY | File::CREAT | File::APPEND, 0o600) do |file|
-        file.flock(File::LOCK_EX)
-        file.write(json + "\n")
-        file.flush
-        file.fsync
-      end
-      live { remote.commit(kind: "giraffe-harness-live", content: content, precedence: content.fetch("revision"), correlation: run_id) }
-      content["revision"].to_s
-    end
-
-    def read_records(kind)
-      raise Error, "unsupported local record kind #{kind}" unless kind == PrGraph::Shapes::HARNESS
-      File.open(path.sub(/\.jsonl\z/, ".state.jsonl")) do |file|
+    def self.read_states(path)
+      File.open(sibling(path, ".state.jsonl")) do |file|
         file.flock(File::LOCK_SH)
         file.each_line.map { |line| JSON.parse(line) }
       end
@@ -46,15 +22,49 @@ module Giraffe
       raise Error, "local state journal is damaged; recover from the last Temper checkpoint"
     end
 
+    def initialize(path:, run_id:, context: nil, ticket:, mirror: true)
+      @path, @run_id, @context, @ticket, @mirror = path, run_id, context, ticket, mirror
+    end
+
+    def event_log = @event_log ||= PrGraph::StoredEventLog.new(self)
+    def artifact_log = @artifact_log ||= PrGraph::StoredArtifactLog.new(self, execution_log: event_log)
+    def failure_log = @failure_log ||= PrGraph::StoredFailureLog.new(self, execution_log: event_log)
+    def coordinator(session:)
+      LiveCoordinator.new(self, execution_path: path, run_id: run_id, session: session,
+                              event_log: event_log, artifact_log: artifact_log, failure_log: failure_log)
+    end
+
+    def read_states = self.class.read_states(path)
+
+    def append_state(content)
+      json = JSON.generate(content)
+      reason = PrGraph::ContentScan.violation(content, json)
+      raise Error, "state was not stored: #{reason}" if reason
+      File.open(sibling(".state.jsonl"), File::WRONLY | File::CREAT | File::APPEND, 0o600) do |file|
+        file.flock(File::LOCK_EX)
+        file.write(json + "\n")
+        file.flush
+        file.fsync
+      end
+      live do
+        remote.commit(kind: PrGraph::Shapes::HARNESS_LIVE, content: content.slice(*PrGraph::Shapes::HARNESS_LIVE_FIELDS),
+                      precedence: content.fetch("revision"), correlation: run_id)
+      end
+    end
+
+    def sync_status
+      target = sibling(".sync.json")
+      File.exist?(target) ? JSON.parse(File.read(target)) : {"mode" => @mirror ? "mirrored" : "local", "synced" => false}
+    end
+
     def sync(state)
       return {"mode" => "local", "synced" => false} unless @mirror
-      remote = self.remote
       logs = {
         PrGraph::Shapes::EVENT_LOG => event_log.validate_file!(path),
-        PrGraph::Shapes::ARTIFACT_LOG => artifact_log.read(path.sub(/\.jsonl\z/, ".artifacts.jsonl"), allow_empty: true),
-        PrGraph::Shapes::FAILURE_LOG => failure_log.read(path.sub(/\.jsonl\z/, ".failures.jsonl"), allow_empty: true)
+        PrGraph::Shapes::ARTIFACT_LOG => artifact_log.read(sibling(".artifacts.jsonl"), allow_empty: true),
+        PrGraph::Shapes::FAILURE_LOG => failure_log.read(sibling(".failures.jsonl"), allow_empty: true)
       }
-      coordinator(execution_path: path, session: state.fetch("session")).snapshot
+      coordinator(session: state.fetch("session")).snapshot
       # Evidence before the log rows referring to it. The remote copy may be ahead of the last fully
       # synced checkpoint if an earlier sync was interrupted; matching writes are safe to repeat.
       logs.fetch(PrGraph::Shapes::ARTIFACT_LOG).select { |row| row["e"] == "artifact" }.group_by { |row| row["family"] }.each do |family, rows|
@@ -67,7 +77,7 @@ module Giraffe
           remote.commit_evidence(row, bytes)
         end
       end
-      manifests = Dir.glob(path.sub(/\.jsonl\z/, ".coordinator/*.json")).sort.to_h { |file| [File.basename(file), File.read(file)] }
+      manifests = Dir.glob(sibling(".coordinator/*.json")).sort.to_h { |file| [File.basename(file), File.read(file)] }
       held = remote.read_records(PrGraph::Shapes::MANIFEST)
       manifests.each do |name, text|
         next if held.include?({"name" => name, "text" => text})
@@ -77,39 +87,25 @@ module Giraffe
       logs.each do |kind, rows|
         held_rows = remote.read_records(kind).flat_map { |row| row.fetch("events") }.uniq
         raise Error, "Temper history diverges from this local run" unless held_rows.all? { |row| rows.include?(row) }
-        rows.each do |row|
-          next if held_rows.include?(row)
-          digest = Digest::SHA256.hexdigest(JSON.generate(row.sort.to_h))
-          uuid = [digest[0, 8], digest[8, 4], digest[12, 4], digest[16, 4], digest[20, 12]].join("-")
-          remote.commit(kind: kind, content: {"transition_id" => uuid, "events" => [row]}, precedence: row.fetch("seq"), correlation: run_id)
-        end
+        rows.each { |row| commit_row(kind, row) unless held_rows.include?(row) }
       end
       checkpoint = {"logs" => logs.transform_values(&:length), "manifests" => manifests.transform_values { |text| Digest::SHA256.hexdigest(text) }}
       remote_state = state.merge("runtime" => state.fetch("runtime").merge("sync_checkpoint" => checkpoint))
       unless remote.read_records(PrGraph::Shapes::HARNESS).include?(remote_state)
         remote.commit(kind: PrGraph::Shapes::HARNESS, content: remote_state, precedence: state.fetch("revision"), correlation: run_id)
       end
-      status = {"mode" => "mirrored", "synced" => true, "revision" => state["revision"], "event_seq" => logs[PrGraph::Shapes::EVENT_LOG].length}
-      write_sync_status(status)
-      status
+      write_sync_status({"mode" => "mirrored", "synced" => true, "revision" => state["revision"], "event_seq" => logs[PrGraph::Shapes::EVENT_LOG].length})
     rescue StandardError => error
-      status = {"mode" => "mirrored", "synced" => false, "error" => error.message}
-      write_sync_status(status)
-      status
+      write_sync_status({"mode" => "mirrored", "synced" => false, "error" => error.message})
     end
 
-    def live_transition(kind, rows, log_path)
+    # What the Stored logs call to append: the journal takes the rows first, then Temper, and a row Temper
+    # misses waits for the next sync.
+    def append(kind, _path, events, evidence: {})
+      yield
       live do
-        if kind == PrGraph::Shapes::ARTIFACT_LOG
-          rows.select { |row| row["e"] == "artifact" }.each do |row|
-            remote.commit_evidence(row, File.binread(File.join(File.dirname(log_path), row.fetch("content_ref"))))
-          end
-        end
-        rows.each do |row|
-          digest = Digest::SHA256.hexdigest(JSON.generate(row.sort.to_h))
-          uuid = [digest[0, 8], digest[8, 4], digest[12, 4], digest[16, 4], digest[20, 12]].join("-")
-          remote.commit(kind: kind, content: {"transition_id" => uuid, "events" => [row]}, precedence: row.fetch("seq"), correlation: run_id)
-        end
+        evidence.each { |record, bytes| remote.commit_evidence(record, bytes) }
+        events.each { |row| commit_row(kind, row) }
       end
     end
 
@@ -119,8 +115,17 @@ module Giraffe
 
     private
 
+    def sibling(suffix) = self.class.sibling(path, suffix)
+
     def remote
-      @remote ||= PrGraph::Store.new(context: context, run_id: run_id, ticket: @ticket, cli: @cli, backoff: [], versioned: true).open!
+      @remote ||= PrGraph::Store.new(context: context, run_id: run_id, ticket: @ticket, backoff: [], versioned: true).open!
+    end
+
+    # A row's transition ID derives from its content, so a retry after a lost acknowledgement cannot add it twice.
+    def commit_row(kind, row)
+      digest = Digest::SHA256.hexdigest(JSON.generate(row.sort.to_h))
+      uuid = [digest[0, 8], digest[8, 4], digest[12, 4], digest[16, 4], digest[20, 12]].join("-")
+      remote.commit(kind: kind, content: {"transition_id" => uuid, "events" => [row]}, precedence: row.fetch("seq"), correlation: run_id)
     end
 
     def live
@@ -132,36 +137,11 @@ module Giraffe
     end
 
     def write_sync_status(status)
-      target = path.sub(/\.jsonl\z/, ".sync.json")
+      target = sibling(".sync.json")
       temporary = "#{target}.tmp"
       File.open(temporary, "w", 0o600) { |file| file.write(JSON.generate(status)); file.flush; file.fsync }
       File.rename(temporary, target)
-    end
-  end
-  class LiveEventLog < PrGraph::EventLog
-    def initialize(store) = (@store = store; super())
-    private
-    def append!(path, additions)
-      super
-      @store.live_transition(PrGraph::Shapes::EVENT_LOG, additions, path)
-    end
-  end
-
-  class LiveArtifactLog < PrGraph::ArtifactLog
-    def initialize(store, **options) = (@store = store; super(**options))
-    private
-    def append!(path, additions)
-      super
-      @store.live_transition(PrGraph::Shapes::ARTIFACT_LOG, additions, path)
-    end
-  end
-
-  class LiveFailureLog < PrGraph::FailureLog
-    def initialize(store, **options) = (@store = store; super(**options))
-    private
-    def append_events!(path, additions)
-      super
-      @store.live_transition(PrGraph::Shapes::FAILURE_LOG, additions, path)
+      status
     end
   end
 
@@ -173,5 +153,4 @@ module Giraffe
       @store.live_manifest(path)
     end
   end
-
 end

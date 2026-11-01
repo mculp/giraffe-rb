@@ -11,15 +11,14 @@ module Giraffe
       @command = command
     end
 
-    def call(repo, *args)
-      @command.run!(["git", "-C", repo, *args], cwd: repo, timeout: 120).strip
-    end
+    def call(repo, *args) = run_git(repo, *args, timeout: 120).strip
 
     def clean!(repo)
       raise Error, "worktree is dirty; inspect or restore interrupted work before resuming: #{repo}" unless call(repo, "status", "--porcelain=v1", "--untracked-files=all").empty?
     end
 
     def head(repo) = call(repo, "rev-parse", "HEAD")
+    def resolve_commit(repo, ref) = call(repo, "rev-parse", "--verify", "#{ref}^{commit}")
 
     def fingerprint(repo)
       {"head" => head(repo), "branch" => call(repo, "symbolic-ref", "--quiet", "--short", "HEAD"),
@@ -34,9 +33,15 @@ module Giraffe
       raise Error, "read-only step changed the candidate or working tree" unless fingerprint(repo) == before
     end
 
+    # The block's value, once it is known not to have changed the candidate or working tree.
+    def read_only(repo)
+      before = fingerprint(repo)
+      yield.tap { unchanged!(repo, before) }
+    end
+
     def worktree(repo:, path:, branch:, base:)
       call(repo, "check-ref-format", "--branch", branch)
-      base_sha = call(repo, "rev-parse", "--verify", "#{base}^{commit}")
+      base_sha = resolve_commit(repo, base)
       if File.exist?(path)
         raise Error, "unexpected existing worktree path: #{path}" unless File.directory?(path) && File.realpath(call(path, "rev-parse", "--show-toplevel")) == File.realpath(path)
         raise Error, "worktree belongs to another branch" unless call(path, "branch", "--show-current") == branch
@@ -44,8 +49,7 @@ module Giraffe
         clean!(path)
       else
         # Never adopt an unrelated pre-existing branch implicitly.
-        result = @command.capture(["git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/#{branch}"], cwd: repo)
-        raise Error, "branch already exists outside this run: #{branch}" if result["status"].zero?
+        raise Error, "branch already exists outside this run: #{branch}" if exit_status(repo, "show-ref", "--verify", "--quiet", "refs/heads/#{branch}").zero?
         FileUtils.mkdir_p(File.dirname(path))
         call(repo, "worktree", "add", "-b", branch, path, base_sha)
       end
@@ -58,20 +62,21 @@ module Giraffe
 
     def commit(repo, message)
       call(repo, "add", "-A", "--", ".")
-      result = @command.capture(["git", "-C", repo, "diff", "--cached", "--quiet"], cwd: repo)
-      return nil if result["status"].zero?
-      raise Error, "could not inspect staged change" unless result["status"] == 1
+      staged = exit_status(repo, "diff", "--cached", "--quiet")
+      return nil if staged.zero?
+      raise Error, "could not inspect staged change" unless staged == 1
       call(repo, "-c", "core.hooksPath=/dev/null", "commit", "-m", message)
       clean!(repo)
       head(repo)
     end
 
-    def diff(repo, base)
-      @command.run!(["git", "-C", repo, "diff", "--binary", "#{base}...HEAD", "--"], cwd: repo, timeout: 120)
-    end
+    def diff(repo, base) = run_git(repo, "diff", "--binary", "#{base}...HEAD", "--", timeout: 120)
+
+    # All or nothing: a patch that does not apply raises and leaves the tree alone.
+    def apply(repo, patch) = run_git(repo, "apply", "-", input: patch)
 
     def changed_paths(repo)
-      raw = @command.run!(["git", "-C", repo, "status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd: repo)
+      raw = run_git(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all")
       entries = raw.split("\0")
       paths = []
       until entries.empty?
@@ -93,5 +98,10 @@ module Giraffe
         end
       end
     end
+
+    private
+
+    def run_git(repo, *args, **options) = @command.run!(["git", *args], cwd: repo, **options)
+    def exit_status(repo, *args) = @command.capture(["git", *args], cwd: repo)["status"]
   end
 end

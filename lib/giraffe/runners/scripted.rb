@@ -2,7 +2,7 @@
 
 require "json"
 require "fileutils"
-require_relative "../schema"
+require_relative "../errors"
 
 module Giraffe
   module Runners
@@ -27,7 +27,7 @@ module Giraffe
         raise entry if entry.is_a?(Exception)
         entry = {"output" => entry} unless entry.key?("output")
         entry.fetch("writes", {}).each do |relative, content|
-          raise Error, "fixture writes are allowed only for BUILD or REPRODUCE" unless request[:writable]
+          raise Error, "fixture writes are allowed only for BUILD" unless request[:writable]
           root = File.realpath(request.fetch(:cwd))
           path = File.expand_path(relative, root)
           raise Error, "fixture write escapes its directory" unless path.start_with?("#{root}/") && !relative.split("/").include?(".git")
@@ -35,7 +35,6 @@ module Giraffe
           raise Error, "fixture write follows an escaping symlink" unless File.realpath(File.dirname(path)).start_with?("#{root}/") || File.realpath(File.dirname(path)) == root
           File.write(path, content)
         end
-        Schema.validate!(request.fetch(:schema), entry.fetch("output"))
         {"output" => entry.fetch("output"), "usage" => {"cost_usd" => entry.fetch("cost_usd", 0.0), "turns" => 1}}
       end
     end

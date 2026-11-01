@@ -57,10 +57,10 @@ class RunnerTest < Minitest::Test
     assert_in_delta 0.12, error.usage["cost_usd"]
   end
 
-  def test_invalid_structured_output_keeps_known_usage
-    invalid = success.merge("structured_output" => {"answer" => 42})
-    error = assert_raises(Giraffe::InvalidOutput) { call(invalid) }
-    assert_in_delta 0.12, error.usage["cost_usd"]
+  def test_structured_output_returns_with_its_usage_for_the_caller_to_judge
+    result = call(success.merge("structured_output" => {"answer" => 42}))
+    assert_equal({"answer" => 42}, result["output"])
+    assert_in_delta 0.12, result["usage"]["cost_usd"]
   end
 
   def test_malformed_json_and_error_result_are_refused

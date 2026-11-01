@@ -91,11 +91,12 @@ structured result records its reported cost. A malformed response or lost proces
 reservation conservatively. No automatic invalid-output retry is currently attempted.
 
 BUILD runs each plan assignment in a fresh context, commits its files, then repeats executable checks
-and independent review within the configured round limit. VERIFY runs checks again, refuses any
+and independent review within the configured round limit. A red edge from VERIFY re-enters BUILD as one
+fix batch carrying the failed verification, not a replay of the plan. VERIFY runs checks again, refuses any
 candidate/worktree mutation, and audits acceptance criteria without giving the auditor the plan.
 Unmet or unverifiable criteria cannot publish. Changed specs require real production mutation patches;
-the harness executes each mutation in a disposable candidate worktree and records the command result.
-For reproduced bugs, it executes the new regression spec on the base and candidate, requiring red then
+the harness executes each mutation in a disposable candidate worktree and records the command result
+in the verification artifact. For reproduced bugs, it executes the new regression spec on the base and candidate, requiring red then
 green. Those proofs are executable evidence, while the model still judges their meaning and quality.
 
 Publishing pushes the verified clean candidate and uses GitHub's returned repository, PR identity,

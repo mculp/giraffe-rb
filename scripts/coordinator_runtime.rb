@@ -449,6 +449,12 @@ module PrGraph
       end
     end
 
+    # The contract checks `complete` applies to a passing VERIFY, for a caller deciding pass or fail before
+    # it saves the evidence. Raises a ContractError where `complete` would refuse.
+    def validate_verification!(verification, worktree:)
+      with_lock { validate_verification(verification, load_state, worktree) }
+    end
+
     private
 
     def error!(message)
@@ -982,9 +988,7 @@ module PrGraph
         end
       when "VERIFY"
         if expected_pass
-          validate_ac_audit!(outputs, state)
-          validate_spec_audit!(outputs, state, worktree)
-          validate_regression!(outputs, state, worktree)
+          validate_verification(read_structured_artifact!(output_by_family!(outputs, "verification")), state, worktree)
         end
       when "PUBLISH"
         publish = output_by_family!(outputs, "publish_manifest")
@@ -1006,24 +1010,30 @@ module PrGraph
       end
     end
 
-    def validate_ac_audit!(outputs, state)
+    def validate_verification(verification, state, worktree)
+      validate_ac_audit!(verification, state)
+      validate_spec_audit!(verification, state, worktree)
+      validate_regression!(verification, state, worktree)
+    end
+
+    def validate_ac_audit!(verification, state)
       triage = current_artifacts(state, "triage_brief")
       error!("VERIFY requires exactly one current triage_brief") unless triage.one?
       register = @outcome_contract.validate_register!(read_structured_artifact!(triage.first))
       @ac_audit_contract.validate!(
-        read_structured_artifact!(output_by_family!(outputs, "verification")),
+        verification,
         clause_ids: register.fetch("clause_ids"),
         candidate_sha: current_candidate!(state)
       )
     end
 
-    def validate_spec_audit!(outputs, state, worktree)
+    def validate_spec_audit!(verification, state, worktree)
       error!("VERIFY spec_audit needs the attempt's worktree") unless worktree
       base = spec_audit_base(state)
       error!("VERIFY spec_audit needs a current repro_report or worktree_manifest to derive the base") unless base
       candidate = current_candidate!(state)
       @spec_audit_contract.validate!(
-        read_structured_artifact!(output_by_family!(outputs, "verification")),
+        verification,
         candidate_sha: candidate, base_sha: base,
         spec_paths: SpecAuditContract.changed_spec_paths(worktree, base, candidate)
       )
@@ -1039,7 +1049,7 @@ module PrGraph
       worktree.first["input_sha"] if worktree.one?
     end
 
-    def validate_regression!(outputs, state, worktree)
+    def validate_regression!(verification, state, worktree)
       return unless policy.fetch("nodes").key?("REPRODUCE") && !skipped_for_run?("REPRODUCE", state)
 
       repro = current_artifacts(state, "repro_report")
@@ -1051,7 +1061,7 @@ module PrGraph
       changed = git_capture(worktree, "diff", "--name-only", report.fetch("base_sha"), candidate).split("\n")
       @repro_contract.validate_regression!(
         report,
-        read_structured_artifact!(output_by_family!(outputs, "verification")),
+        verification,
         candidate_sha: candidate,
         changed_paths: changed
       )

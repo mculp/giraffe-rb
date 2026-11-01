@@ -2,7 +2,8 @@
 
 require "json"
 require "digest"
-require "pathname"
+require_relative "../../scripts/pr_ci_contract"
+require_relative "../../scripts/temper_cli"
 require_relative "errors"
 
 module Giraffe
@@ -43,10 +44,10 @@ module Giraffe
       unknown = data.keys - DEFAULTS.keys - %w[repo runs_dir context github_repo script profiles]
       raise Error, "unknown configuration key(s): #{unknown.join(', ')}" if unknown.any?
       raise Error, "repo does not exist" unless File.directory?(data.fetch("repo"))
-      raise Error, "context is required (Temper context ref)" if data["store"] == "mirrored" && !data["context"].to_s.match?(%r{\A(?:[@+][a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*|[a-f0-9-]{36})\z})
+      raise Error, "context is required (Temper context ref)" if data["store"] == "mirrored" && !data["context"].to_s.match?(PrGraph::TemperCli::CONTEXT_REF)
       raise Error, "store must be local or mirrored" unless %w[local mirrored].include?(data["store"])
       raise Error, "models must map role names to model names" unless data["models"].is_a?(Hash) && data["models"].all? { |key, value| key.is_a?(String) && value.is_a?(String) && !value.empty? }
-      raise Error, "github_repo must be OWNER/NAME" unless data["github_repo"].to_s.match?(%r{\A[\w.-]+/[\w.-]+\z})
+      raise Error, "github_repo must be OWNER/NAME" unless data["github_repo"].to_s.match?(PrGraph::PrCiContract::REPOSITORY_NAME)
       raise Error, "base must be a Git ref" if data["base"].to_s.empty? || data["base"].start_with?("-") || data["base"].match?(/[\r\n]/)
       %w[checks lint].each do |key|
         raise Error, "#{key} must be an array of command argument arrays" unless data[key].is_a?(Array) && data[key].all? { |argv| argv.is_a?(Array) && argv.any? && argv.all? { |v| v.is_a?(String) && !v.include?("\0") } }

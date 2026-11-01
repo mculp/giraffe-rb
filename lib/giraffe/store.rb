@@ -118,6 +118,11 @@ module PrGraph
       contents(kind)
     end
 
+    # The run's last fully synced harness state, if it has one.
+    def latest_checkpoint
+      read_records(Shapes::HARNESS).max_by { |row| row.fetch("revision") }
+    end
+
     def artifact_log
       @artifact_log ||= StoredArtifactLog.new(self, execution_log: event_log)
     end
@@ -146,26 +151,17 @@ module PrGraph
                  "#{File.join(dir, base)}.artifacts", "#{File.join(dir, base)}.coordinator"]
       raise Error, "#{targets.find { |target| File.exist?(target) }} already exists" if targets.any? { |target| File.exist?(target) }
 
-      resource || raise(Error, "#{context} holds no run #{run_id}")
-      checkpoint = contents(Shapes::HARNESS).max_by { |row| row.fetch("revision") }&.dig("runtime", "sync_checkpoint")
-      events = transitions(EVENT_LOG)
-      events = events.first(checkpoint.fetch("logs").fetch(EVENT_LOG)) if checkpoint
+      checkpoint = latest_checkpoint&.dig("runtime", "sync_checkpoint")
+      events = synced_rows(EVENT_LOG, checkpoint)
       raise Error, "#{context} holds no #{EVENT_LOG} for run #{run_id}" if events.empty?
 
-      artifact_events = transitions(ARTIFACT_LOG)
-      failures = transitions(FAILURE_LOG)
-      if checkpoint
-        artifact_events = artifact_events.first(checkpoint.fetch("logs").fetch(ARTIFACT_LOG))
-        failures = failures.first(checkpoint.fetch("logs").fetch(FAILURE_LOG))
-        {EVENT_LOG => events, ARTIFACT_LOG => artifact_events, FAILURE_LOG => failures}.each do |kind, rows|
-          raise Error, "synced #{kind} rows are missing" unless rows.length == checkpoint.fetch("logs").fetch(kind)
-        end
-      end
+      artifact_events = synced_rows(ARTIFACT_LOG, checkpoint)
+      failures = synced_rows(FAILURE_LOG, checkpoint)
       blobs = blobs_for(artifact_events, base)
       manifests = manifests_for(events)
       if checkpoint
-        manifests.select! { |name, _| checkpoint.fetch("manifests").key?(name) }
         expected = checkpoint.fetch("manifests")
+        manifests = manifests.slice(*expected.keys)
         actual = manifests.transform_values { |text| Digest::SHA256.hexdigest(text) }
         raise Error, "synced coordinator manifests are missing or changed" unless actual == expected
       end
@@ -208,7 +204,9 @@ module PrGraph
       shapes.to_h { |kind, schema| [kind, "#{kind}-#{Digest::SHA256.hexdigest(JSON.generate(schema))[0, 16]}"] }
     end
 
+    # Finding the resource is what loads the run's kind map, so it comes first.
     def physical_kind(kind)
+      resource
       @kind_map ? @kind_map.fetch(kind) : kind
     end
 
@@ -252,9 +250,11 @@ module PrGraph
                    "Hydrate the run from Temper into a new path instead of appending here"
     end
 
+    # A versioned kind's name already carries its schema's digest, so only an unversioned one needs reading back.
     def declared_current?(shape, schema)
-      shape && shape["enforcement"] == "enforcing" &&
-        temper("data-artifact", "schema", "show", shape.fetch("shape_id")).dig("schema", "title") == schema["title"]
+      return false unless shape && shape["enforcement"] == "enforcing"
+
+      @kind_map || temper("data-artifact", "schema", "show", shape.fetch("shape_id")).dig("schema", "title") == schema["title"]
     end
 
     def find_resource
@@ -330,6 +330,17 @@ module PrGraph
         held[id] = content
       end
       held.values.flat_map { |content| content.fetch("events") }.sort_by { |event| event.fetch("seq") }
+    end
+
+    # A log's events up to what the checkpoint synced: live rows past it are not silently adopted.
+    def synced_rows(kind, checkpoint)
+      rows = transitions(kind)
+      return rows unless checkpoint
+
+      count = checkpoint.fetch("logs").fetch(kind)
+      raise Error, "synced #{kind} rows are missing" if rows.length < count
+
+      rows.first(count)
     end
 
     def canonical(value)
@@ -415,7 +426,8 @@ module PrGraph
     end
   end
 
-  # An event log whose appends are stored first.
+  # An event log whose appends go through its store's `append`, which orders them against the local write:
+  # Store takes each in Temper first and refuses on failure; Giraffe::LocalStore journals first and mirrors after.
   class StoredEventLog < EventLog
     def initialize(store, contract_path: nil)
       @store = store
@@ -429,7 +441,7 @@ module PrGraph
     end
   end
 
-  # An artifact log whose appends are stored first, each artifact's content before the transition naming it.
+  # An artifact log whose appends go through its store, each artifact's content before the transition naming it.
   class StoredArtifactLog < ArtifactLog
     def initialize(store, contract_path: nil, execution_log: EventLog.new)
       @store = store
@@ -446,7 +458,7 @@ module PrGraph
     end
   end
 
-  # A failure log whose appends are stored first.
+  # A failure log whose appends go through its store.
   class StoredFailureLog < FailureLog
     def initialize(store, contract_path: nil, execution_log: EventLog.new)
       @store = store

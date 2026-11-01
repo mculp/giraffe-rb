@@ -2,6 +2,7 @@
 
 require "json"
 require "open3"
+require_relative "process_group"
 
 module PrGraph
   # Runs the `temper` CLI, `temper` on PATH or the path in PR_GRAPH_TEMPER_BIN, and parses its JSON.
@@ -24,9 +25,7 @@ module PrGraph
         out = Thread.new { stdout.read }
         err = Thread.new { stderr.read }
         unless wait.join(TIMEOUT)
-          Process.kill("TERM", -wait.pid) rescue nil
-          sleep 0.05
-          Process.kill("KILL", -wait.pid) rescue nil
+          ProcessGroup.terminate(wait.pid)
           out.join
           err.join
           raise Error, "Temper did not answer within #{TIMEOUT}s"

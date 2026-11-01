@@ -7,7 +7,7 @@ module Giraffe
     module Preparation
       def step_triage
         @git.clean!(@run.config["repo"])
-        output = ask("triage", {"ticket" => @run.state["ticket"]}, cwd: @run.config["repo"])
+        output = ask("triage", {}, cwd: @run.config["repo"])
         put("triage_brief", output.merge("ticket" => @run.state["ticket"]))
         finish
       end
@@ -22,8 +22,7 @@ module Giraffe
 
       def step_investigate
         reports = %w[ticket prior_art codebase].to_h do |perspective|
-          [perspective, ask("investigate", {"perspective" => perspective, "ticket" => @run.state["ticket"],
-                                           "triage" => artifact("triage_brief")}, unit: perspective)]
+          [perspective, ask("investigate", {"perspective" => perspective, "triage" => artifact("triage_brief")}, unit: perspective)]
         end
         put("investigation_report", {"reports" => reports})
         finish
@@ -44,14 +43,10 @@ module Giraffe
         scratch = File.join(@run.directory, "probe")
         FileUtils.mkdir_p(scratch, mode: 0o700)
         # The model reads the repo from its normal cwd and returns probe source as structured data.
-        output = ask("reproduce", {"ticket" => @run.state["ticket"], "investigation" => artifact("investigation_report"),
-                                  "outcomes" => clause_ids, "base_sha" => base_sha})
+        output = ask("reproduce", {"investigation" => artifact("investigation_report"), "outcomes" => clause_ids, "base_sha" => base_sha})
         probe = File.join(scratch, "probe.rb")
         File.write(probe, output.fetch("source"), mode: "w", perm: 0o600)
-        before = @git.fingerprint(worktree)
-        results = @checks.run(worktree, [[RbConfig.ruby, probe]])
-        @git.unchanged!(worktree, before)
-        result = results.fetch(0)
+        result = read_only_checks([[RbConfig.ruby, probe]]).fetch(0)
         unless result["exit_code"] == output["expected_exit"] && result["excerpt"].include?(output["expected_output"])
           raise Error, "the harness could not reproduce the reported base behavior"
         end
@@ -64,9 +59,8 @@ module Giraffe
       end
 
       def step_plan
-        output = ask("plan", {"ticket" => @run.state["ticket"], "triage" => artifact("triage_brief"),
-                              "investigation" => artifact("investigation_report"), "reproduction" => artifact("repro_report")})
-        PrGraph::OutcomeContract.new.validate_plan!(artifact("triage_brief"), output["implementation_plan"], output["test_plan"])
+        output = ask("plan", {"triage" => artifact("triage_brief"), "investigation" => artifact("investigation_report"), "reproduction" => artifact("repro_report")})
+        outcome_contract.validate_plan!(artifact("triage_brief"), output["implementation_plan"], output["test_plan"])
         put("implementation_plan", output.fetch("implementation_plan"))
         put("test_plan", output.fetch("test_plan"))
         checkpoint("ui", output.fetch("ui"))

@@ -148,9 +148,22 @@ class HarnessTest < Minitest::Test
 
   def test_invalid_model_output_cannot_advance
     run = start
-    assert_raises(Giraffe::InvalidOutput) { execute(run, {"triage" => [{"questions" => [], "summary" => "thin"}]}) }
+    invalid = {"output" => {"questions" => [], "summary" => "thin"}, "cost_usd" => 0.12}
+    assert_raises(Giraffe::InvalidOutput) { execute(run, {"triage" => [invalid]}) }
     assert_equal ["TRIAGE"], run.coordinator.snapshot["attempts"].values.map { |row| row["node"] }
+    assert_equal [0.12], run.state.dig("runtime", "calls").values.map { |call| call["charge"] }, "an invalid result still costs what it reported"
     assert_empty @github.calls
+  end
+
+  def test_state_carrying_a_secret_is_refused_as_a_harness_error
+    error = assert_raises(Giraffe::Error) { Giraffe::Run.start(config, ticket.merge("description" => "token ghp_#{'a' * 36}")) }
+    assert_match(/secret pattern/, error.message)
+  end
+
+  def test_check_excerpt_cut_inside_a_character_is_still_json
+    checks = Giraffe::Checks.new(config, command: @command)
+    result = checks.run(@tmp, [[RbConfig.ruby, "-e", 'print "é" * 7000 + "x"']]).first
+    assert JSON.generate(result)
   end
 
   def test_unsafe_configuration_is_refused_before_execution
@@ -260,6 +273,7 @@ class HarnessTest < Minitest::Test
     assert_equal "fail", proof.dig("regression", "base", "result")
     assert_equal "pass", proof.dig("regression", "candidate", "result")
     assert_equal "fail", proof.dig("spec_audit", "specs", 0, "mutation", "result")
+    assert_includes proof.dig("mutation_proofs", 0, "excerpt"), "wrong greeting", "the mutation's command result is kept as evidence"
     assert @git.call(File.join(run.directory, "worktree"), "status", "--porcelain").empty?
   end
 
@@ -268,11 +282,15 @@ class HarnessTest < Minitest::Test
     first = Marshal.load(Marshal.dump(data["audit"][0]))
     first["clauses"][0] = {"clause_id" => clauses[0], "verdict" => "unmet", "reason" => "Greeting needs another adjustment"}
     data["audit"].unshift(first)
+    units = data["plan"][0]["implementation_plan"]["steps"]
+    units << units[0].merge("id" => "second")
+    data["build"] << {"output" => {"questions" => [], "summary" => "Nothing further for this unit"}}
     data["build"] << {"output" => {"questions" => [], "summary" => "Addressed acceptance finding"}, "writes" => {"app.rb" => "puts 'fixed again'\n"}}
     data["review"] << data["review"][0]
     run = start
     execute(run, data)
     assert_equal "draft_pr", run.state["status"]
+    assert_equal 3, @runner.calls.count { |call| call[:step] == "build" }, "a red edge is one fix batch, not a replay of every unit"
     snapshot = run.coordinator.snapshot
     assert_equal 2, snapshot["attempts"].values.count { |a| a["node"] == "BUILD" }
     assert_equal 1, snapshot["edges"].length
@@ -322,9 +340,8 @@ class HarnessTest < Minitest::Test
     assert_equal 1, rows.count { |row| row.dig("open_meta", "giraffe_run_id") == id }
   end
 
-  def test_resume_does_not_depend_on_derived_state_cache
+  def test_load_recovers_state_from_the_journal
     run = start
-    File.unlink(run.path.sub(/\.jsonl\z/, ".harness.json"))
     recovered = Giraffe::Run.load(run.path)
     assert_equal run.id, recovered.id
     assert_equal run.state, recovered.state
@@ -354,6 +371,23 @@ class HarnessTest < Minitest::Test
     assert_equal "Use fixed", stored.state["answers"][question]["answer"]
     assert_equal 2, stored.state.dig("runtime", "script_positions", "triage")
     assert_equal "waiting_for_answers", cli("graph", started["path"])["nodes"].find { |row| row["id"] == "INVESTIGATE" }["status"]
+  end
+
+  def test_cli_restore_installs_the_last_checkpoint_as_a_loadable_run
+    run = start(store: "mirrored")
+    assert run.sync["synced"]
+    restored = cli("restore", run.id, "--context", "+test/runs", "--ticket", ticket["id"], "--destination", File.join(@tmp, "restored"))
+    assert_equal "restored", restored["status"]
+    assert_equal run.state["revision"], restored["revision"]
+    assert_equal run.id, cli("status", restored["path"]).dig("graph", "run_id")
+  end
+
+  def test_cli_cancel_requests_an_active_run_and_marks_an_idle_one
+    run = start
+    active = run.lock { cli("cancel", run.path) }
+    assert active["cancel_requested"]
+    refute_equal "cancelled", active["status"], "the active harness stops itself"
+    assert_equal "cancelled", cli("cancel", run.path)["status"]
   end
 
   def test_cli_dry_run_performs_no_run_model_temper_or_git_writes

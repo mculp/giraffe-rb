@@ -9,17 +9,27 @@ module Giraffe
           finish
           return
         end
-        units = artifact("implementation_plan").fetch("steps")
-        units.each { |unit| write_batch(unit.fetch("id"), {"assignment" => unit, "verification_feedback" => runtime["verification_feedback"]}) }
+        plan = artifact("implementation_plan")
+        units = plan.fetch("steps")
+        if (feedback = runtime["verification_feedback"])
+          # A red edge from VERIFY is one fix batch; the plan's units are already committed.
+          write_batch("verification-fix", {"plan" => plan, "verification_feedback" => feedback})
+        else
+          units.each { |unit| write_batch(unit.fetch("id"), {"assignment" => unit}) }
+        end
         reviews = []
+        checks = review = candidate = nil
         @run.config["max_fix_rounds"].times do |round|
-          checks = build_checks
-          review = ask("review", {"ticket" => @run.state["ticket"], "plan" => artifact("implementation_plan"),
-                                  "diff" => @git.diff(worktree, base_sha), "checks" => checks}, unit: "review-#{round}")
-          reviews << review
+          head = @git.head(worktree)
+          # A fix that changed nothing, or a resume past recorded fixes, leaves nothing new to check or review.
+          unless head == candidate
+            candidate = head
+            checks = read_only_checks
+            review = ask("review", {"plan" => plan, "diff" => @git.diff(worktree, base_sha), "checks" => checks}, unit: "review-#{round}")
+            reviews << review
+          end
           blocking = review.fetch("findings").select { |finding| finding["severity"] == "blocking" }
           if blocking.empty? && checks.all? { |check| check["exit_code"].zero? }
-            candidate = @git.head(worktree)
             raise Error, "BUILD produced no change from the base" if candidate == base_sha
             put("build_manifest", {"candidate_sha" => candidate, "base_sha" => base_sha,
                                    "steps" => units.map { |unit| unit["id"] }, "checks" => checks}, candidate: candidate, covered: clause_ids)
@@ -40,31 +50,23 @@ module Giraffe
         recovered = @git.call(worktree, "log", "--format=%H", "--fixed-strings", "--grep=#{trailer}", "#{base_sha}..HEAD").lines.map(&:strip)
         if recovered.any?
           raise Error, "ambiguous recovered BUILD commit" unless recovered.one?
-          checkpoint("build_commits", runtime.fetch("build_commits", {}).merge(key => recovered.first))
+          @run.checkpoint_entry("build_commits", key, recovered.first)
           return
         end
         @git.clean!(worktree)
-        ask("build", assignment.merge("ticket" => @run.state["ticket"], "test_plan" => artifact("test_plan"),
-                                      "reproduction" => runtime["reproduction"], "answers" => @run.state["answers"]), writable: true, unit: unit)
+        ask("build", assignment.merge("test_plan" => artifact("test_plan"), "reproduction" => runtime["reproduction"]), writable: true, unit: unit)
         guard_changed_paths!
         # Autocorrect belongs to BUILD; VERIFY runs it read-only and refuses any resulting mutation.
         @checks.run(worktree, @run.config["lint"])
         guard_changed_paths!
         sha = @git.commit(worktree, "#{@run.state.dig('ticket', 'title')}\n\n#{trailer}") || @git.head(worktree)
-        checkpoint("build_commits", runtime.fetch("build_commits", {}).merge(key => sha))
+        @run.checkpoint_entry("build_commits", key, sha)
       end
 
       def guard_changed_paths!
         paths = @git.changed_paths(worktree)
         forbidden = paths.select { |path| path.match?(%r{(^|/)(\.git|\.claude|\.cursor|\.giraffe|\.env(?:\..*)?|credentials)(/|$)|(^|/)(CLAUDE|AGENTS)\.md$|\.(pem|key)$}) }
         raise Error, "BUILD changed protected files: #{forbidden.join(', ')}" if forbidden.any?
-      end
-
-      def build_checks
-        before = @git.fingerprint(worktree)
-        results = @checks.run(worktree)
-        @git.unchanged!(worktree, before)
-        results
       end
     end
   end

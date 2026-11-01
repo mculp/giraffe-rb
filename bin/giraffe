@@ -33,51 +33,31 @@ begin
              else
                run = Giraffe::Run.start(config, ticket)
                Giraffe::Harness.new(run).run
-               {"path" => run.path, "status" => run.state["status"], "questions" => run.state["questions"], "sync" => run.sync}
+               {"path" => run.path, "status" => run.state["status"], "questions" => run.state["questions"], "sync" => run.store.sync_status}
              end
            when "status", "resume", "harness", "answer", "cancel", "sync", "graph", "events"
-             run = Giraffe::Run.load(File.expand_path(ARGV.shift || raise(Giraffe::Error, "run path is required")))
+             run = Giraffe::Run.load(ARGV.shift || raise(Giraffe::Error, "run path is required"))
              case command
              when "resume", "harness" then Giraffe::Harness.new(run).run
              when "answer"
                run.answer(ARGV.shift, ARGV.join(" "))
                run.sync
-             when "cancel"
-               File.write(File.join(run.directory, "cancel.request"), "cancel\n", mode: "w", perm: 0o600)
-               begin
-                 run.lock { run.update(status: "cancelled", error: "Cancellation requested by the operator") }
-               rescue Giraffe::Error => error
-                 raise unless error.message.include?("active harness")
-               end
+             when "cancel" then run.cancel
              when "sync" then run.lock { run.sync }
              end
-             if command == "graph"
-               puts JSON.pretty_generate(Giraffe::GraphView.new(run).snapshot)
-               exit
-             elsif command == "events"
-               puts JSON.pretty_generate(Giraffe::GraphView.new(run).events(after: options.fetch(:after, 0)))
-               exit
+             view = Giraffe::GraphView.new(run)
+             case command
+             when "graph" then view.snapshot
+             when "events" then view.events(after: options.fetch(:after, 0))
+             else
+               graph = view.snapshot
+               {"path" => run.path, "status" => run.state["status"], "questions" => run.state["questions"], "error" => run.state["error"],
+                "cancel_requested" => run.cancel_requested?, "graph" => graph, "sync" => graph["storage"]}
              end
-             sync_file = run.path.sub(/\.jsonl\z/, ".sync.json")
-             {"path" => run.path, "status" => run.state["status"], "questions" => run.state["questions"], "error" => run.state["error"],
-              "cancel_requested" => File.exist?(File.join(run.directory, "cancel.request")),
-              "graph" => Giraffe::GraphView.new(run).snapshot,
-              "sync" => File.exist?(sync_file) ? JSON.parse(File.read(sync_file)) : {"synced" => false}}
            when "restore"
              id = ARGV.shift || raise(Giraffe::Error, "run ID is required")
-             raise Giraffe::Error, "invalid run ID" unless id.match?(PrGraph::EventLog::UUID)
              %i[context ticket destination].each { |key| raise Giraffe::Error, "--#{key} is required" unless options[key] }
-             destination = File.expand_path(options[:destination])
-             raise Giraffe::Error, "restore destination must be empty" if File.exist?(destination) && Dir.children(destination).any?
-             remote = PrGraph::Store.new(context: options[:context], run_id: id, ticket: options[:ticket])
-             records = remote.read_records(PrGraph::Shapes::HARNESS)
-             state = records.max_by { |row| row.fetch("revision") } || raise(Giraffe::Error, "no fully synced checkpoint")
-             raise Giraffe::Error, "checkpoint identity mismatch" unless state["run_id"] == id && state.dig("config", "context") == options[:context]
-             FileUtils.mkdir_p(destination, mode: 0o700)
-             path = File.join(destination, "run.jsonl")
-             remote.hydrate(path)
-             File.write(path.sub(/\.jsonl\z/, ".state.jsonl"), JSON.generate(state) + "\n", mode: "w", perm: 0o600)
-             File.write(path.sub(/\.jsonl\z/, ".harness.json"), JSON.generate(state), mode: "w", perm: 0o600)
+             path, state = Giraffe::Run.restore(id, **options.slice(:context, :ticket, :destination))
              {"path" => path, "status" => "restored", "revision" => state["revision"], "note" => "Repository and worktree paths must still exist; cross-host relocation is not implemented."}
            else
              puts parser
