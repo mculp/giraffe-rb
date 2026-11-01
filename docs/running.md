@@ -45,9 +45,12 @@ base ref before starting. Paths below resolve relative to the configuration file
 
 Commands are argument arrays. At least one executable check is mandatory. `spec_command` selects the
 spec or example named by an audit; `{spec}` and `{line}` are substitutions in those arguments, never
-shell interpolation. For frameworks without line filtering, configure the command to run the named
-spec file. The harness checks coverage of changed spec **files** and validates cited lines; exhaustive
-discovery of every example is not yet enforced. The model is asked to audit every example.
+shell interpolation. For a whole-file run, `{spec}:{line}` becomes just the path. For frameworks without
+line filtering, configure the command to run the named spec file. Proofs run in clean checkouts, so
+`spec_command` must work without anything a check generated or installed in the worktree; when specs need
+dependencies, make the command install them. The harness checks coverage of changed spec **files** and
+validates cited lines; exhaustive discovery of every example is not yet enforced. The model is asked to
+audit every example. A check that passes its time or output limit counts as failed, with exit 124.
 
 On macOS, checks default to a filesystem/network sandbox with controller credentials removed from
 the environment. It permits writes in the worktree and temporary directories, so lint and builds can
@@ -88,18 +91,20 @@ dirty source/worktrees are refused. A killed writer with uncommitted edits pause
 Completed commits carry a run/attempt/unit trailer so a restart can recover a commit made just before
 its checkpoint. A lost model result retains its full budget reservation. A known successful or failed
 structured result records its reported cost. A malformed response or lost process retains the
-reservation conservatively. An output the contracts refuse, such as a plan or a mutation patch, stays
-billed and pauses the run; `resume` asks again with the refusal in the prompt. No automatic invalid-output
-retry is currently attempted.
+reservation conservatively. An invalid output, or one the contracts refuse, such as a plan or a mutation
+patch, stays billed and pauses the run; `resume` asks again with the refusal in the prompt. No automatic
+invalid-output retry is currently attempted.
 
 BUILD runs each plan assignment in a fresh context, commits its files, then repeats executable checks
 and independent review within the configured round limit. A red edge from VERIFY re-enters BUILD as one
 fix batch carrying the failed verification, not a replay of the plan. VERIFY runs checks again, refuses any
 candidate/worktree mutation, and audits acceptance criteria without giving the auditor the plan.
-Unmet or unverifiable criteria cannot publish. Changed specs require real production mutation patches;
-the harness executes each mutation in a disposable candidate worktree and records the command result
-in the verification artifact. For reproduced bugs, it executes the new regression spec on the base and candidate, requiring red then
-green. Those proofs are executable evidence, while the model still judges their meaning and quality.
+Unmet or unverifiable criteria cannot publish. Changed specs require mutations of existing production
+source; the harness runs each spec unmutated and then mutated in a disposable candidate worktree and
+records the command result in the verification artifact. A spec that fails unmutated sends VERIFY red.
+For reproduced bugs, it executes the new regression spec on the base and candidate, requiring red then
+green; a candidate without that spec goes red too. Those proofs are executable evidence, while the model
+still judges their meaning and quality.
 
 Publishing pushes the verified clean candidate and uses GitHub's returned repository, PR identity,
 head SHA, and draft state. A compare URL is not a PR. Retries reuse a matching existing draft. Running

@@ -8,6 +8,8 @@ module Giraffe
   class Checks
     # Do not pass controller/model/GitHub/Linear/Temper credentials to target-repo code.
     ENV_ALLOWED = [*Command::BASE_ENV, "SHELL", "GEM_HOME", "GEM_PATH", "BUNDLE_PATH"].freeze
+    # The exit status of a check past its limits, after timeout(1): to its caller it simply failed.
+    OVER_LIMIT = 124
 
     def initialize(config, command: Command.new)
       @config, @command = config, command
@@ -16,15 +18,20 @@ module Giraffe
     def run(cwd, commands = @config["checks"])
       env = ENV.slice(*ENV_ALLOWED).merge("CI" => "1")
       commands.map do |argv|
-        actual = @config["sandbox_checks"] ? sandbox(cwd, argv) : argv
-        result = @command.capture(actual, cwd: cwd, env: env, clean_env: true, timeout: @config["check_timeout"])
-        output = result["stdout"] + result["stderr"]
+        status, output = capture(@config["sandbox_checks"] ? sandbox(cwd, argv) : argv, cwd, env)
         # A byte offset can land inside a character, which the journals could not then encode as JSON.
-        {"command" => argv, "exit_code" => result["status"], "excerpt" => (output.byteslice(-12_000, 12_000) || output).scrub}
+        {"command" => argv, "exit_code" => status, "excerpt" => (output.byteslice(-12_000, 12_000) || output).scrub}
       end
     end
 
     private
+
+    def capture(argv, cwd, env)
+      result = @command.capture(argv, cwd: cwd, env: env, clean_env: true, timeout: @config["check_timeout"])
+      [result["status"], result["stdout"] + result["stderr"]]
+    rescue CommandLimit => error
+      [OVER_LIMIT, error.message]
+    end
 
     def sandbox(cwd, argv)
       raise Error, "sandboxed checks currently require macOS; use an isolated test host and explicitly set sandbox_checks=false elsewhere" unless RbConfig::CONFIG["host_os"].include?("darwin")

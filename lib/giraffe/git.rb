@@ -73,14 +73,15 @@ module Giraffe
     def diff(repo, base) = run_git(repo, "diff", "--binary", "#{base}...HEAD", "--", timeout: 120)
 
     # All or nothing: a patch that does not apply raises and leaves the tree alone.
-    def apply(repo, patch)
-      result = @command.capture(["git", "apply", "-"], cwd: repo, input: patch)
-      raise PatchRejected, "patch does not apply: #{result['stderr'].lines.first.to_s.strip}" unless result["status"].zero?
+    def apply(repo, patch) = run_patch(repo, patch)
+
+    # The paths a patch touches, read from the patch itself rather than the tree it would change.
+    def patch_paths(repo, patch)
+      run_patch(repo, patch, "--numstat", "-z").split("\0").map { |entry| entry.split("\t", 3).last }
     end
 
-    # `ignored` also counts gitignored files, which a patch can create though status normally hides them.
-    def changed_paths(repo, ignored: false)
-      raw = run_git(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all", *("--ignored" if ignored))
+    def changed_paths(repo)
+      raw = run_git(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all")
       entries = raw.split("\0")
       paths = []
       until entries.empty?
@@ -104,6 +105,12 @@ module Giraffe
     end
 
     private
+
+    def run_patch(repo, patch, *options)
+      result = @command.capture(["git", "apply", *options, "-"], cwd: repo, input: patch)
+      raise PatchRejected, "patch does not apply: #{result['stderr'].lines.first.to_s.strip}" unless result["status"].zero?
+      result["stdout"]
+    end
 
     def run_git(repo, *args, **options) = @command.run!(["git", *args], cwd: repo, **options)
     def exit_status(repo, *args) = @command.capture(["git", *args], cwd: repo)["status"]

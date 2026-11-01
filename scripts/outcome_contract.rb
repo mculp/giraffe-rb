@@ -6,7 +6,7 @@ require_relative "event_log"
 
 module PrGraph
   class OutcomeContract
-    class OutcomeError < ContractError; end
+    class OutcomeError < ContentError; end
 
     attr_reader :contract
 

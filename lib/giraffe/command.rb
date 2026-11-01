@@ -26,7 +26,7 @@ module Giraffe
             while (chunk = stream.read(16_384))
               data << chunk
               if data.bytesize > LIMIT
-                raise Error, "command output exceeds #{LIMIT} bytes"
+                raise CommandLimit, "command output exceeds #{LIMIT} bytes"
               end
             end
             data
@@ -45,7 +45,7 @@ module Giraffe
         begin
           loop do
             raise Cancelled, "run cancelled" if @cancelled.call
-            raise Error, "command timed out after #{timeout}s" if Process.clock_gettime(Process::CLOCK_MONOTONIC) - started > timeout
+            raise CommandLimit, "command timed out after #{timeout}s" if Process.clock_gettime(Process::CLOCK_MONOTONIC) - started > timeout
             readers.each { |thread| thread.value unless thread.alive? }
             pending = [waiter, *readers, writer].find(&:alive?)
             break unless pending

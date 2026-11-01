@@ -8,6 +8,8 @@ require "time"
 
 module PrGraph
   class ContractError < StandardError; end
+  # An artifact breaks its contract through what its author wrote, so the author can correct it.
+  class ContentError < ContractError; end
 
   class EventLog
     UUID = /\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/i.freeze

@@ -43,21 +43,29 @@ module Giraffe
       end
 
       def save_reproduction(output)
-        # Models write a probe outside the repository. Its bytes are persisted so resuming does not
-        # require the old process or a session transcript.
-        scratch = File.join(@run.directory, "probe")
-        FileUtils.mkdir_p(scratch, mode: 0o700)
-        probe = File.join(scratch, "probe.rb")
-        File.write(probe, output.fetch("source"), mode: "w", perm: 0o600)
-        result = read_only_checks([[RbConfig.ruby, probe]]).fetch(0)
+        spec = output.fetch("regression_spec")
+        raise InvalidOutput, "regression_spec must be a file path, not a command or filter: #{spec}" if spec.match?(/[\s:]/)
+        safe_file(worktree, spec, existing: false)
+        result = run_probe(output.fetch("source"))
         unless result["exit_code"] == output["expected_exit"] && result["excerpt"].include?(output["expected_output"])
-          raise InvalidOutput, "the harness could not reproduce the reported base behavior: the probe exited #{result['exit_code']}"
+          raise InvalidOutput, "the harness could not reproduce the reported base behavior: expected exit #{output['expected_exit']} and output containing " \
+                               "#{output['expected_output']}, got exit #{result['exit_code']}: #{result['excerpt'].split.last(40).join(' ')}"
         end
         checkpoint("reproduction", output)
         report = output.slice("steps", "expected", "observed", "code_path", "clause_ids").merge(
-          "status" => "reproduced", "base_sha" => base_sha, "rerun" => output.fetch("regression_spec"),
+          "status" => "reproduced", "base_sha" => base_sha, "rerun" => spec,
           "evidence" => [{"command" => "ruby stored-probe.rb", "excerpt" => result["excerpt"]}])
         put("repro_report", report)
+      end
+
+      # Models write a probe outside the repository. Its bytes are persisted so resuming does not require the
+      # old process or a session transcript, and it runs in a disposable checkout so it cannot touch the worktree.
+      def run_probe(source)
+        scratch = File.join(@run.directory, "probe")
+        FileUtils.mkdir_p(scratch, mode: 0o700)
+        probe = File.join(scratch, "probe.rb")
+        File.write(probe, source, mode: "w", perm: 0o600)
+        @git.at_commit(worktree, base_sha) { |tree| @checks.run(tree, [[RbConfig.ruby, probe]]).first }
       end
 
       def step_plan

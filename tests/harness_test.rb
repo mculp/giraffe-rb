@@ -151,7 +151,7 @@ class HarnessTest < Minitest::Test
     invalid = {"output" => {"questions" => [], "summary" => "thin"}, "cost_usd" => 0.12}
     assert_raises(Giraffe::InvalidOutput) { execute(run, {"triage" => [invalid]}) }
     assert_equal ["TRIAGE"], run.coordinator.snapshot["attempts"].values.map { |row| row["node"] }
-    assert_equal [0.12], run.state.dig("runtime", "calls").values.map { |call| call["charge"] }, "an invalid result still costs what it reported"
+    assert_equal 0.12, run.state.dig("runtime", "calls").values.sum { |call| call["charge"] }, "an invalid result still costs what it reported"
     assert_empty @github.calls
   end
 
@@ -271,15 +271,20 @@ class HarnessTest < Minitest::Test
     data
   end
 
-  def start_bug = start(checks: [[RbConfig.ruby, "test/greeting_test.rb"]], spec_command: [RbConfig.ruby, "{spec}"])
+  def start_bug(**overrides) = start(**{checks: [[RbConfig.ruby, "test/greeting_test.rb"]], spec_command: [RbConfig.ruby, "{spec}"]}, **overrides)
   def new_file_patch(path) = "diff --git a/#{path} b/#{path}\nnew file mode 100644\n--- /dev/null\n+++ b/#{path}\n@@ -0,0 +1 @@\n+abort 'boom'\n"
   def copy(value) = Marshal.load(Marshal.dump(value))
+  def refusal_in(call) = JSON.parse(call[:prompt].lines.last)["previous_output_refused_because"]
+  def verification_of(run)
+    record = run.coordinator.snapshot["artifacts"].find { |row| row["family"] == "verification" && row["status"] == "current" }
+    JSON.parse(File.read(File.join(run.directory, record["content_ref"])))
+  end
 
   # A refused output pauses the run, stays billed and is not replayed: resuming asks again and says why.
-  def assert_resume_asks_again(role, data, refused, reason)
+  def assert_resume_asks_again(role, data, refused, reason, **overrides)
     data[role] = [{"output" => refused, "cost_usd" => 0.25}, data.fetch(role).first]
     runner = Giraffe::Runners::Scripted.new(data)
-    run = data.key?("reproduce") ? start_bug : start
+    run = data.key?("reproduce") ? start_bug(**overrides) : start(**overrides)
     error = assert_raises(Giraffe::InvalidOutput, PrGraph::ContractError) { execute(run, runner) }
     assert_match(reason, error.message)
     assert_equal "paused", run.state["status"]
@@ -288,9 +293,16 @@ class HarnessTest < Minitest::Test
     assert_equal "draft_pr", run.state["status"]
     asked = runner.calls.select { |call| call[:step] == role }
     assert_equal 2, asked.length
-    refute_includes asked.first[:prompt], error.message
-    assert_includes asked.last[:prompt], error.message
+    assert_nil refusal_in(asked.first)
+    assert_equal error.message, refusal_in(asked.last)
     run
+  end
+
+  def assert_mutation_refused(patch, reason = /existing production source only/)
+    data = bug_script
+    refused = copy(data["spec_audit"][0])
+    refused["specs"][0]["patch"] = patch
+    assert_resume_asks_again("spec_audit", data, refused, reason)
   end
 
   def test_refused_triage_is_asked_again_on_resume
@@ -299,9 +311,44 @@ class HarnessTest < Minitest::Test
     assert_resume_asks_again("triage", script, refused, /duplicate id/)
   end
 
+  def test_output_the_schema_refuses_is_asked_again_on_resume
+    assert_resume_asks_again("triage", script, {"questions" => [], "summary" => "thin"}, /outcome_register|oneOf|required|missing/i)
+  end
+
+  def test_output_carrying_a_secret_is_asked_again_on_resume
+    leaky = triage
+    leaky["summary"] = "Found token ghp_#{'a' * 36} in fixtures"
+    assert_resume_asks_again("triage", script, leaky, /secret pattern/)
+  end
+
   def test_probe_that_does_not_reproduce_is_asked_again_on_resume
     data = bug_script
-    assert_resume_asks_again("reproduce", data, data["reproduce"][0].merge("expected_exit" => 7), /could not reproduce/)
+    assert_resume_asks_again("reproduce", data, data["reproduce"][0].merge("expected_exit" => 7),
+                             /could not reproduce.*expected exit 7.*got exit 1.*wrong greeting/)
+  end
+
+  def test_probe_that_hangs_is_asked_again_on_resume
+    data = bug_script
+    assert_resume_asks_again("reproduce", data, data["reproduce"][0].merge("source" => "sleep 30"), /got exit 124/, check_timeout: 2)
+  end
+
+  def test_probe_cannot_touch_the_worktree
+    data = bug_script
+    data["reproduce"][0]["source"] = 'File.write("scratch.txt", "x"); ' + data["reproduce"][0]["source"]
+    run = start_bug
+    execute(run, data)
+    assert_equal "draft_pr", run.state["status"]
+    refute File.exist?(File.join(run.directory, "worktree", "scratch.txt"))
+  end
+
+  def test_regression_spec_that_is_not_a_plain_path_is_asked_again_on_resume
+    data = bug_script
+    assert_resume_asks_again("reproduce", data, data["reproduce"][0].merge("regression_spec" => "test/greeting_test.rb:1"), /must be a file path/)
+  end
+
+  def test_regression_spec_outside_the_worktree_is_asked_again_on_resume
+    data = bug_script
+    assert_resume_asks_again("reproduce", data, data["reproduce"][0].merge("regression_spec" => "../outside_test.rb"), /invalid relative proof path/)
   end
 
   def test_refused_repro_report_is_asked_again_on_resume
@@ -342,39 +389,119 @@ class HarnessTest < Minitest::Test
   end
 
   def test_mutation_patch_that_does_not_apply_is_asked_again_on_resume
-    data = bug_script
-    refused = copy(data["spec_audit"][0])
-    refused["specs"][0]["patch"] = MUTATION.sub("Hello", "Howdy")
-    assert_resume_asks_again("spec_audit", data, refused, /does not apply/)
+    assert_mutation_refused(MUTATION.sub("Hello", "Howdy"), /does not apply/)
   end
 
-  def test_mutation_cannot_add_a_file_that_is_not_production_source
-    data = bug_script
-    refused = copy(data["spec_audit"][0])
-    refused["specs"][0]["patch"] = MUTATION + new_file_patch("boom.txt")
-    assert_resume_asks_again("spec_audit", data, refused, /production source only/)
+  def test_mutation_that_changes_nothing_is_asked_again_on_resume
+    assert_mutation_refused(MUTATION.sub("hello", "Hello"), /changed nothing/)
+  end
+
+  def test_mutation_cannot_add_a_file_that_is_not_source
+    assert_mutation_refused(MUTATION + new_file_patch("boom.txt"))
   end
 
   def test_mutation_cannot_add_a_new_spec
-    data = bug_script
-    refused = copy(data["spec_audit"][0])
-    refused["specs"][0]["patch"] = MUTATION + new_file_patch("test/boom_test.rb")
-    assert_resume_asks_again("spec_audit", data, refused, /production source only/)
-  end
-
-  def test_mutation_cannot_add_a_gitignored_file
-    File.write(File.join(@repo, ".gitignore"), "generated/\n")
-    data = bug_script
-    refused = copy(data["spec_audit"][0])
-    refused["specs"][0]["patch"] = MUTATION + new_file_patch("generated/boom.txt")
-    assert_resume_asks_again("spec_audit", data, refused, /production source only/)
+    assert_mutation_refused(MUTATION + new_file_patch("test/boom_test.rb"))
   end
 
   def test_mutation_cannot_add_test_support_code
+    assert_mutation_refused(MUTATION + new_file_patch("test/support/boom.rb"))
+  end
+
+  def test_mutation_cannot_add_a_source_file_an_autoloader_would_pick_up
+    assert_mutation_refused(new_file_patch("lib/boom.rb"))
+  end
+
+  def test_mutation_cannot_add_a_gitignored_source_file
+    File.write(File.join(@repo, ".gitignore"), "generated/\n")
+    assert_mutation_refused(MUTATION + new_file_patch("generated/boom.rb"))
+  end
+
+  def test_mutation_cannot_change_an_existing_spec
+    line = 'require_relative "../app"; abort "wrong greeting" unless greeting("Ada") == "Hello Ada"'
+    assert_mutation_refused("diff --git a/test/greeting_test.rb b/test/greeting_test.rb\n--- a/test/greeting_test.rb\n+++ b/test/greeting_test.rb\n@@ -1 +1 @@\n-#{line}\n+abort 'boom'\n")
+  end
+
+  def test_only_production_source_can_be_mutated
+    %w[app.rb lib/a/b.rb src/x.ts pkg/main.go src/Main.java lib/latest.py].each do |path|
+      assert PrGraph::SpecAuditContract.production_source?(path), "#{path} is production source"
+    end
+    %w[.hidden.rb lib/.hidden.rb notes.txt Gemfile spec/a_spec.rb test/a_test.rb src/a.spec.ts test/support/boom.rb tests/conftest.py
+       conftest.py spec_helper.rb test_helper.rb __tests__/x.js config/environments/test.rb jest.config.js pkg/x_test.go test_x.py
+       src/FooTest.java].each do |path|
+      refute PrGraph::SpecAuditContract.production_source?(path), "#{path} is not production source"
+    end
+  end
+
+  def test_files_a_checkout_hook_writes_are_not_blamed_on_the_mutation
+    File.write(File.join(@repo, ".gitignore"), "generated/\n")
+    hook = File.join(@repo, ".git/hooks/post-checkout")
+    File.write(hook, "#!/bin/sh\nmkdir -p generated && echo x > generated/hook.txt\n")
+    File.chmod(0o755, hook)
     data = bug_script
-    refused = copy(data["spec_audit"][0])
-    refused["specs"][0]["patch"] = MUTATION + new_file_patch("test/support/boom.rb")
-    assert_resume_asks_again("spec_audit", data, refused, /production source only/)
+    run = start_bug
+    execute(run, data)
+    assert_equal "draft_pr", run.state["status"]
+    assert_equal 1, @runner.calls.count { |call| call[:step] == "spec_audit" }
+  end
+
+  def test_mutation_that_hangs_counts_as_caught
+    data = bug_script
+    data["spec_audit"][0]["specs"][0]["patch"] = MUTATION.sub('"hello " + name', "sleep 30")
+    run = start_bug(check_timeout: 2)
+    execute(run, data)
+    assert_equal "draft_pr", run.state["status"]
+    assert_equal 124, verification_of(run).dig("mutation_proofs", 0, "exit_code")
+  end
+
+  def test_check_past_its_limits_is_a_failed_check
+    checks = Giraffe::Checks.new(config(check_timeout: 1), command: @command)
+    slow, noisy = checks.run(@tmp, [[RbConfig.ruby, "-e", "sleep 30"], [RbConfig.ruby, "-e", 'print "x" * 3_000_000']])
+    assert_equal [124, 124], [slow["exit_code"], noisy["exit_code"]]
+    assert_match(/timed out/, slow["excerpt"])
+    assert_match(/exceeds/, noisy["excerpt"])
+  end
+
+  def test_spec_needing_ignored_state_goes_red_instead_of_faking_a_kill
+    File.write(File.join(@repo, ".gitignore"), "generated/\n")
+    data = bug_script
+    spec = data["build"][0]["writes"]["test/greeting_test.rb"]
+    data["build"][0]["writes"]["test/greeting_test.rb"] = %(require_relative "../generated/helper"; #{spec})
+    data["build"] << {"output" => {"questions" => [], "summary" => "Made the spec self-contained"}, "writes" => {"test/greeting_test.rb" => spec}}
+    data["review"] << data["review"][0]
+    data["audit"] << data["audit"][0]
+    data["spec_audit"] << data["spec_audit"][0]
+    prepare = "require 'fileutils'; FileUtils.mkdir_p('generated'); File.write('generated/helper.rb', ''); load 'test/greeting_test.rb'"
+    run = start(checks: [[RbConfig.ruby, "-e", prepare]], spec_command: [RbConfig.ruby, "{spec}"])
+    execute(run, data)
+    assert_equal "draft_pr", run.state["status"]
+    assert_equal 2, run.coordinator.snapshot["attempts"].values.count { |attempt| attempt["node"] == "BUILD" }
+    assert_includes @runner.calls.select { |call| call[:step] == "build" }.last[:prompt], "clean checkout"
+  end
+
+  def test_whole_file_spec_run_drops_the_line_from_the_documented_spec_command
+    data = bug_script
+    # Like rspec, refuses a location whose line is empty.
+    runner = "abort 'cannot load ' + ARGV[0] if ARGV[0].end_with?(':'); load ARGV[0].split(':').first"
+    run = start_bug(spec_command: [RbConfig.ruby, "-e", runner, "{spec}:{line}"])
+    execute(run, data)
+    assert_equal "draft_pr", run.state["status"]
+    assert_equal "pass", verification_of(run).dig("regression", "candidate", "result")
+  end
+
+  def test_red_on_an_unchanged_candidate_reaches_the_recurrence_stop
+    data = script
+    unsure = copy(data["audit"][0])
+    unsure["clauses"][0] = {"clause_id" => clauses[0], "verdict" => "unverifiable", "reason" => "Cannot tell from here"}
+    data["audit"] = [unsure] * 6
+    data["review"] *= 6
+    data["build"] += Array.new(5) { {"output" => {"questions" => [], "summary" => "Nothing to change"}} }
+    run = start
+    error = assert_raises(PrGraph::Coordinator::CoordinatorError) { execute(run, data) }
+    assert_match(/recurring failure.*verification/, error.message)
+    assert_equal "paused", run.state["status"]
+    assert run.coordinator.snapshot.dig("failure_queue", "stopped")
+    assert_empty @github.calls
   end
 
   def test_candidate_missing_its_regression_spec_goes_red_instead_of_stopping_the_run

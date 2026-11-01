@@ -421,7 +421,7 @@ module PrGraph
         runnable, = runnable_nodes(state)
         open_attempts = state.fetch("attempts").values.select { |attempt| attempt["state"] == "open" }
         if !state.fetch("terminal") && runnable.empty? && open_attempts.empty?
-          error!("run is stalled: no runnable node, open attempt, or terminal DONE")
+          error!(recurring_failure_stop(state) || "run is stalled: no runnable node, open attempt, or terminal DONE")
         end
         resume_projection(state, worktree: worktree, offline: offline)
       end
@@ -631,10 +631,8 @@ module PrGraph
       errors = []
       errors << "--refresh is valid only for BOT-FEEDBACK" if refresh && node != "BOT-FEEDBACK"
       errors << "run is already terminal" if state.fetch("terminal")
-      if state.dig("failure_queue", "stopped")
-        stops = state.dig("failure_queue", "stops").map { |stop| stop["failure_id"] }.uniq
-        errors << "run stopped by recurring failure(s): #{stops.join(', ')}"
-      end
+      stop = recurring_failure_stop(state)
+      errors << stop if stop
       open_attempts = state.fetch("attempts").values.select { |attempt| attempt["state"] == "open" }
       errors << "#{node} already has an open attempt" if open_attempts.any? { |attempt| attempt["node"] == node }
       if node == writer_node
@@ -1009,6 +1007,12 @@ module PrGraph
           expected_pass: expected_pass
         )
       end
+    end
+
+    def recurring_failure_stop(state)
+      return unless state.dig("failure_queue", "stopped")
+
+      "run stopped by recurring failure(s): #{state.dig('failure_queue', 'stops').map { |stop| stop['failure_id'] }.uniq.join(', ')}"
     end
 
     def validate_plan(implementation, test_plan, state)

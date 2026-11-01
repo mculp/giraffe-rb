@@ -39,7 +39,7 @@ module Giraffe
     def append_state(content)
       json = JSON.generate(content)
       reason = PrGraph::ContentScan.violation(content, json)
-      raise Error, "state was not stored: #{reason}" if reason
+      raise UnstorableContent, "state was not stored: #{reason}" if reason
       File.open(sibling(".state.jsonl"), File::WRONLY | File::CREAT | File::APPEND, 0o600) do |file|
         file.flock(File::LOCK_EX)
         file.write(json + "\n")

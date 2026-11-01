@@ -12,7 +12,7 @@ module PrGraph
   # spec fails to pin behavior, and its named behavior is mutated to prove the spec goes red. A spec
   # that restates the code it covers passes review and CI while catching nothing.
   class SpecAuditContract
-    class SpecAuditError < ContractError; end
+    class SpecAuditError < ContentError; end
 
     CLASSES = %w[
       restates_literal
@@ -23,9 +23,23 @@ module PrGraph
     ].freeze
     MUTATION_RESULTS = %w[fail pass].freeze
     SPEC_PATH = %r{(\A|/)(spec|test)/.+(_spec\.rb|_test\.rb)\z|\.(spec|test)\.[jt]sx?\z}
+    SOURCE_FILE = /\.(rb|[jt]sx?|py|go|rs|java|ex|exs)\z/
+    HIDDEN_PATH = %r{(\A|/)\.}
+    # Code that exists to run tests rather than the product, beyond the specs themselves.
+    TEST_CODE = %r{
+      (\A|/)(spec|tests?|__tests__)/ |
+      (\A|/)(spec_helper|rails_helper|test_helper|conftest)\.\w+\z |
+      (\A|/)test_\w+\.py\z | _(test|spec)\.\w+\z | Tests?\.java\z |
+      (\A|/)config/environments/test\.rb\z | \.config\.[cm]?[jt]s\z
+    }x
 
     def self.spec_path?(path)
       SPEC_PATH.match?(path)
+    end
+
+    # Whether a mutation here changes what the product does, rather than how it is tested or configured.
+    def self.production_source?(path)
+      SOURCE_FILE.match?(path) && !HIDDEN_PATH.match?(path) && !TEST_CODE.match?(path) && !spec_path?(path)
     end
 
     # Spec files the candidate adds or changes since the base.
