@@ -118,7 +118,7 @@ changed files, which it can read for itself.
 
 BUILD runs each plan assignment in a fresh context, commits its files, then repeats executable checks
 and independent review within the configured round limit. A red edge from VERIFY re-enters BUILD as one
-fix batch carrying the failed verification, not a replay of the plan. VERIFY runs checks again, refuses any
+fix batch carrying the failed verification, not a replay of the plan. If that batch changes nothing, the run asks a person instead of paying to repeat the same red, and the answer reaches the next audit, so what a browser suite or anything else the harness cannot run printed on that candidate can count as evidence. VERIFY runs checks again, refuses any
 candidate/worktree mutation, and audits acceptance criteria without giving the auditor the plan.
 Unmet or unverifiable criteria cannot publish. Changed specs require mutations of existing production
 source or view files, never data or config files such as YAML, or scripts with no extension; the harness runs each spec unmutated and then mutated in disposable candidate worktrees and

@@ -642,15 +642,43 @@ class HarnessTest < Minitest::Test
     assert_includes @runner.calls.select { |call| call[:step] == "build" }.last[:prompt], "clean checkout"
   end
 
-  def test_red_on_an_unchanged_candidate_reaches_the_recurrence_stop
+  def unverifiable_audit(data)
+    copy(data["audit"][0]).tap do |audit|
+      audit["clauses"][0] = {"clause_id" => clauses[0], "verdict" => "unverifiable", "reason" => "Cannot tell from here"}
+    end
+  end
+
+  def test_red_that_build_has_no_edit_for_asks_a_person_and_the_audit_hears_the_answer
     data = script
-    unsure = copy(data["audit"][0])
-    unsure["clauses"][0] = {"clause_id" => clauses[0], "verdict" => "unverifiable", "reason" => "Cannot tell from here"}
-    data["audit"] = [unsure] * 6
+    data["audit"] = [unverifiable_audit(data), data["audit"][0]]
+    data["review"] *= 2
+    data["build"] << {"output" => {"questions" => [], "summary" => "Nothing to change"}}
+    runner = Giraffe::Runners::Scripted.new(data)
+    run = start
+    execute(run, runner)
+    assert_equal "waiting_for_answers", run.state["status"]
+    question = run.state["questions"].first
+    assert_includes question["text"], "Cannot tell from here"
+    assert_includes question["text"], run.coordinator.snapshot["artifacts"].find { |row| row["family"] == "verification" }["candidate_sha"]
+    assert_equal 1, runner.calls.count { |call| call[:step] == "audit" }
+    run.answer(question["id"], "The browser suite passed on this candidate")
+    execute(run, runner)
+    assert_equal "draft_pr", run.state["status"]
+    assert_includes runner.calls.select { |call| call[:step] == "audit" }.last[:prompt], "browser suite passed"
+  end
+
+  def test_red_an_answer_does_not_settle_reaches_the_recurrence_stop
+    data = script
+    data["audit"] = [unverifiable_audit(data)] * 6
     data["review"] *= 6
     data["build"] += Array.new(5) { {"output" => {"questions" => [], "summary" => "Nothing to change"}} }
+    runner = Giraffe::Runners::Scripted.new(data)
     run = start
-    error = assert_raises(PrGraph::Coordinator::CoordinatorError) { execute(run, data) }
+    3.times do
+      execute(run, runner)
+      run.answer(run.state["questions"].first["id"], "I cannot tell either")
+    end
+    error = assert_raises(PrGraph::Coordinator::CoordinatorError) { execute(run, runner) }
     assert_match(/recurring failure.*verification.*remain unverifiable/, error.message)
     assert_equal "paused", run.state["status"]
     assert run.coordinator.snapshot.dig("failure_queue", "stopped")

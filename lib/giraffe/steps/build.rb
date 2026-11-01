@@ -16,6 +16,7 @@ module Giraffe
         if (feedback = runtime["verification_feedback"])
           # A red edge from VERIFY is one fix batch; the plan's units are already committed.
           write_batch("verification-fix", {"plan" => plan, "verification_feedback" => feedback})
+          ask_a_person_if_unchanged(feedback)
         else
           units.each { |unit| write_batch(unit.fetch("id"), {"assignment" => unit}) }
         end
@@ -55,6 +56,18 @@ module Giraffe
           put_build_manifest(candidate, artifact("implementation_plan").fetch("steps"), checks)
         end
         finish
+      end
+
+      # The same candidate can only come back red, so what BUILD has no edit for is a person's to settle.
+      def ask_a_person_if_unchanged(feedback)
+        id = "verification-#{@attempt}"
+        return unless @git.head(worktree) == feedback.fetch("candidate_sha") && !@run.state["answers"].key?(id)
+        open_clauses = feedback.dig("ac_audit", "clauses").to_a.reject { |row| row["verdict"] == "met" }
+        details = open_clauses.map { |row| "#{row['clause_id']}: #{row['reason']}" }.join(" ")
+        text = "VERIFY stays red and BUILD found no edit to make: #{feedback.fetch('reason')}. #{details} " \
+               "Please answer with evidence, such as what a command printed on #{feedback.fetch('candidate_sha')}, or with what should change."
+        @run.update(status: "waiting_for_answers", questions: [{"id" => id, "text" => text, "role" => "build", "attempt_id" => @attempt}])
+        raise Parked, "waiting for a person's answer"
       end
 
       def put_build_manifest(candidate, units, checks)
