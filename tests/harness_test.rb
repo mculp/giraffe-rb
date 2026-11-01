@@ -249,7 +249,10 @@ class HarnessTest < Minitest::Test
     refute File.exist?(ENV["FAKE_TEMPER_LOG"])
   end
 
-  def test_bug_path_executes_reproduction_regression_and_real_mutation
+  MUTATION = "diff --git a/app.rb b/app.rb\n--- a/app.rb\n+++ b/app.rb\n@@ -1 +1 @@\n-def greeting(name); \"Hello \" + name; end\n+def greeting(name); \"hello \" + name; end\n"
+
+  # A reported defect in app.rb, with a script that reproduces it, fixes it and audits its regression spec.
+  def bug_script
     File.write(File.join(@repo, "app.rb"), 'def greeting(name); "hello " + name; end' + "\n")
     @git.commit(@repo, "starting defect")
     @git.call(@repo, "push", "origin", "main")
@@ -264,8 +267,139 @@ class HarnessTest < Minitest::Test
       "app.rb" => 'def greeting(name); "Hello " + name; end' + "\n",
       "test/greeting_test.rb" => 'require_relative "../app"; abort "wrong greeting" unless greeting("Ada") == "Hello Ada"' + "\n"}
     data["spec_audit"] = [{"questions" => [], "specs" => [{"ref" => "test/greeting_test.rb:1", "behavior" => "Requested greeting keeps the name",
-      "classes" => [], "patch" => "diff --git a/app.rb b/app.rb\n--- a/app.rb\n+++ b/app.rb\n@@ -1 +1 @@\n-def greeting(name); \"Hello \" + name; end\n+def greeting(name); \"hello \" + name; end\n"}]}]
-    run = start(checks: [[RbConfig.ruby, "test/greeting_test.rb"]], spec_command: [RbConfig.ruby, "{spec}"])
+      "classes" => [], "patch" => MUTATION}]}]
+    data
+  end
+
+  def start_bug = start(checks: [[RbConfig.ruby, "test/greeting_test.rb"]], spec_command: [RbConfig.ruby, "{spec}"])
+  def new_file_patch(path) = "diff --git a/#{path} b/#{path}\nnew file mode 100644\n--- /dev/null\n+++ b/#{path}\n@@ -0,0 +1 @@\n+abort 'boom'\n"
+  def copy(value) = Marshal.load(Marshal.dump(value))
+
+  # A refused output pauses the run, stays billed and is not replayed: resuming asks again and says why.
+  def assert_resume_asks_again(role, data, refused, reason)
+    data[role] = [{"output" => refused, "cost_usd" => 0.25}, data.fetch(role).first]
+    runner = Giraffe::Runners::Scripted.new(data)
+    run = data.key?("reproduce") ? start_bug : start
+    error = assert_raises(Giraffe::InvalidOutput, PrGraph::ContractError) { execute(run, runner) }
+    assert_match(reason, error.message)
+    assert_equal "paused", run.state["status"]
+    assert_equal 0.25, run.state.dig("runtime", "calls").values.sum { |call| call.fetch("charge", 0.0) }
+    execute(run, runner)
+    assert_equal "draft_pr", run.state["status"]
+    asked = runner.calls.select { |call| call[:step] == role }
+    assert_equal 2, asked.length
+    refute_includes asked.first[:prompt], error.message
+    assert_includes asked.last[:prompt], error.message
+    run
+  end
+
+  def test_refused_triage_is_asked_again_on_resume
+    refused = triage
+    refused["outcome_register"]["negative_face"][0]["id"] = clauses[0]
+    assert_resume_asks_again("triage", script, refused, /duplicate id/)
+  end
+
+  def test_probe_that_does_not_reproduce_is_asked_again_on_resume
+    data = bug_script
+    assert_resume_asks_again("reproduce", data, data["reproduce"][0].merge("expected_exit" => 7), /could not reproduce/)
+  end
+
+  def test_refused_repro_report_is_asked_again_on_resume
+    data = bug_script
+    assert_resume_asks_again("reproduce", data, data["reproduce"][0].merge("clause_ids" => ["outcome:unknown"]), /unknown outcome clause/)
+  end
+
+  def test_plan_the_repro_contract_refuses_is_not_saved_and_is_asked_again_on_resume
+    data = bug_script
+    refused = copy(data["plan"][0])
+    refused["implementation_plan"]["steps"][0]["evidence"].reject! { |item| item["kind"] == "reproduction" }
+    run = assert_resume_asks_again("plan", data, refused, /must cite the repro_report/)
+    plans = run.coordinator.snapshot["artifacts"].select { |row| row["family"] == "implementation_plan" }
+    assert_equal 1, plans.length, "only the accepted plan is saved"
+    assert_equal "current", plans.first["status"]
+  end
+
+  def test_plan_the_outcome_contract_refuses_is_asked_again_on_resume
+    data = script
+    refused = copy(data["plan"][0])
+    refused["test_plan"]["coverage"].pop
+    assert_resume_asks_again("plan", data, refused, /constraint:input/)
+  end
+
+  def test_audit_that_skips_a_clause_is_asked_again_on_resume
+    data = script
+    refused = copy(data["audit"][0])
+    refused["clauses"].pop
+    assert_resume_asks_again("audit", data, refused, /no verdict for clause/)
+  end
+
+  def test_spec_audit_that_skips_a_changed_spec_is_asked_again_on_resume
+    data = bug_script
+    data["build"][0]["writes"]["test/other_test.rb"] = data["build"][0]["writes"]["test/greeting_test.rb"]
+    refused = copy(data["spec_audit"][0])
+    data["spec_audit"][0]["specs"] << refused["specs"][0].merge("ref" => "test/other_test.rb:1")
+    assert_resume_asks_again("spec_audit", data, refused, /no entry for changed spec/)
+  end
+
+  def test_mutation_patch_that_does_not_apply_is_asked_again_on_resume
+    data = bug_script
+    refused = copy(data["spec_audit"][0])
+    refused["specs"][0]["patch"] = MUTATION.sub("Hello", "Howdy")
+    assert_resume_asks_again("spec_audit", data, refused, /does not apply/)
+  end
+
+  def test_mutation_cannot_add_a_file_that_is_not_production_source
+    data = bug_script
+    refused = copy(data["spec_audit"][0])
+    refused["specs"][0]["patch"] = MUTATION + new_file_patch("boom.txt")
+    assert_resume_asks_again("spec_audit", data, refused, /production source only/)
+  end
+
+  def test_mutation_cannot_add_a_new_spec
+    data = bug_script
+    refused = copy(data["spec_audit"][0])
+    refused["specs"][0]["patch"] = MUTATION + new_file_patch("test/boom_test.rb")
+    assert_resume_asks_again("spec_audit", data, refused, /production source only/)
+  end
+
+  def test_mutation_cannot_add_a_gitignored_file
+    File.write(File.join(@repo, ".gitignore"), "generated/\n")
+    data = bug_script
+    refused = copy(data["spec_audit"][0])
+    refused["specs"][0]["patch"] = MUTATION + new_file_patch("generated/boom.txt")
+    assert_resume_asks_again("spec_audit", data, refused, /production source only/)
+  end
+
+  def test_mutation_cannot_add_test_support_code
+    data = bug_script
+    refused = copy(data["spec_audit"][0])
+    refused["specs"][0]["patch"] = MUTATION + new_file_patch("test/support/boom.rb")
+    assert_resume_asks_again("spec_audit", data, refused, /production source only/)
+  end
+
+  def test_candidate_missing_its_regression_spec_goes_red_instead_of_stopping_the_run
+    data = bug_script
+    spec = data["build"][0]["writes"].delete("test/greeting_test.rb")
+    data["build"][0]["writes"]["test/other_test.rb"] = spec
+    data["build"] << {"output" => {"questions" => [], "summary" => "Added the regression spec"}, "writes" => {"test/greeting_test.rb" => spec}}
+    data["review"] << data["review"][0]
+    data["audit"] << data["audit"][0]
+    other = copy(data["spec_audit"][0])
+    other["specs"][0]["ref"] = "test/other_test.rb:1"
+    both = copy(other)
+    both["specs"] << data["spec_audit"][0]["specs"][0]
+    data["spec_audit"] = [other, both]
+    run = start(checks: [[RbConfig.ruby, "test/other_test.rb"]], spec_command: [RbConfig.ruby, "{spec}"])
+    execute(run, data)
+    assert_equal "draft_pr", run.state["status"]
+    assert_equal 2, run.coordinator.snapshot["attempts"].values.count { |attempt| attempt["node"] == "BUILD" }
+    fix = @runner.calls.select { |call| call[:step] == "build" }.last
+    assert_includes fix[:prompt], "regression spec"
+  end
+
+  def test_bug_path_executes_reproduction_regression_and_real_mutation
+    data = bug_script
+    run = start_bug
     execute(run, data)
     assert_equal "draft_pr", run.state["status"]
     record = run.coordinator.snapshot["artifacts"].find { |a| a["family"] == "verification" }

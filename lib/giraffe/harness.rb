@@ -85,6 +85,8 @@ module Giraffe
     def base_sha = runtime.fetch("base_sha") { @git.resolve_commit(@run.config["repo"], @run.config["base"]) }
     def clause_ids = state.dig("outcome_context", "clauses")
     def outcome_contract = @outcome_contract ||= PrGraph::OutcomeContract.new
+    def ac_audit_contract = @ac_audit_contract ||= PrGraph::AcAuditContract.new
+    def spec_audit_contract = @spec_audit_contract ||= PrGraph::SpecAuditContract.new
     def read_only_checks(commands = @run.config["checks"]) = @git.read_only(worktree) { @checks.run(worktree, commands) }
 
     def artifact_record(family)
@@ -116,8 +118,8 @@ module Giraffe
 
     def finish(**options) = @run.coordinator.complete(@node, @attempt, **options)
 
-    def ask(role, inputs, cwd: worktree, writable: false, unit: "main")
-      @model.call(role, attempt: @attempt, inputs: {"ticket" => @run.state["ticket"]}.merge(inputs), cwd: cwd, writable: writable, unit: unit)
+    def ask(role, inputs, cwd: worktree, writable: false, unit: "main", &accept)
+      @model.call(role, attempt: @attempt, inputs: {"ticket" => @run.state["ticket"]}.merge(inputs), cwd: cwd, writable: writable, unit: unit, &accept)
     end
 
     # The graph after finishing any result a crash left half recorded.

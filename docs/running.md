@@ -88,7 +88,9 @@ dirty source/worktrees are refused. A killed writer with uncommitted edits pause
 Completed commits carry a run/attempt/unit trailer so a restart can recover a commit made just before
 its checkpoint. A lost model result retains its full budget reservation. A known successful or failed
 structured result records its reported cost. A malformed response or lost process retains the
-reservation conservatively. No automatic invalid-output retry is currently attempted.
+reservation conservatively. An output the contracts refuse, such as a plan or a mutation patch, stays
+billed and pauses the run; `resume` asks again with the refusal in the prompt. No automatic invalid-output
+retry is currently attempted.
 
 BUILD runs each plan assignment in a fresh context, commits its files, then repeats executable checks
 and independent review within the configured round limit. A red edge from VERIFY re-enters BUILD as one

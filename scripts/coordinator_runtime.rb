@@ -455,6 +455,12 @@ module PrGraph
       with_lock { validate_verification(verification, load_state, worktree) }
     end
 
+    # The contract checks `complete` applies to PLAN's outputs, for a caller deciding whether to save them.
+    # Raises a ContractError where `complete` would refuse.
+    def validate_plan!(implementation_plan, test_plan)
+      with_lock { validate_plan(implementation_plan, test_plan, load_state) }
+    end
+
     private
 
     def error!(message)
@@ -976,16 +982,11 @@ module PrGraph
           input_sha: repro.fetch("input_sha")
         )
       when "PLAN"
-        triage = current_artifacts(state, "triage_brief").first
-        error!("PLAN requires exactly one current triage_brief") unless triage
-        implementation = read_structured_artifact!(output_by_family!(outputs, "implementation_plan"))
-        test_plan = read_structured_artifact!(output_by_family!(outputs, "test_plan"))
-        @outcome_contract.validate_plan!(read_structured_artifact!(triage), implementation, test_plan)
-        if policy.fetch("nodes").key?("REPRODUCE") && !skipped_for_run?("REPRODUCE", state)
-          repro = current_artifacts(state, "repro_report")
-          error!("PLAN requires exactly one current repro_report") unless repro.one?
-          @repro_contract.validate_plan!(read_structured_artifact!(repro.first), implementation, test_plan)
-        end
+        validate_plan(
+          read_structured_artifact!(output_by_family!(outputs, "implementation_plan")),
+          read_structured_artifact!(output_by_family!(outputs, "test_plan")),
+          state
+        )
       when "VERIFY"
         if expected_pass
           validate_verification(read_structured_artifact!(output_by_family!(outputs, "verification")), state, worktree)
@@ -1008,6 +1009,17 @@ module PrGraph
           expected_pass: expected_pass
         )
       end
+    end
+
+    def validate_plan(implementation, test_plan, state)
+      triage = current_artifacts(state, "triage_brief").first
+      error!("PLAN requires exactly one current triage_brief") unless triage
+      @outcome_contract.validate_plan!(read_structured_artifact!(triage), implementation, test_plan)
+      return if !policy.fetch("nodes").key?("REPRODUCE") || skipped_for_run?("REPRODUCE", state)
+
+      repro = current_artifacts(state, "repro_report")
+      error!("PLAN requires exactly one current repro_report") unless repro.one?
+      @repro_contract.validate_plan!(read_structured_artifact!(repro.first), implementation, test_plan)
     end
 
     def validate_verification(verification, state, worktree)

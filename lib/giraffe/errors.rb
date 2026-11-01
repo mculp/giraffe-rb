@@ -6,6 +6,7 @@ module Giraffe
     attr_accessor :usage
   end
   class InvalidOutput < Error; end
+  class PatchRejected < InvalidOutput; end
   class Parked < Error; end
   class Cancelled < Error; end
   class RunLocked < Error; end

@@ -14,7 +14,9 @@ module Giraffe
       @run, @runner, @git = run, runner, git
     end
 
-    def call(role, attempt:, inputs:, cwd:, writable: false, unit: "main")
+    # Yields the output to the step's block, which saves or refuses it. A refused output stays billed but is
+    # dropped, so resuming asks again and says why instead of replaying the refusal.
+    def call(role, attempt:, inputs:, cwd:, writable: false, unit: "main", &accept)
       config = @run.config
       schema = JSON.parse(File.read(File.join(ROOT, "schemas", "#{role}.json")))
       Schema.check!(schema)
@@ -23,15 +25,16 @@ module Giraffe
       cached = calls[key]
       if cached && cached["output"]
         Schema.validate!(schema, cached["output"])
-        return questions!(cached["output"], role, attempt, key)
+        return deliver(cached["output"], role, attempt, key, &accept)
       end
       spent = calls.values.sum { |entry| entry.fetch("charge", 0.0) }
       available = config["run_budget_usd"] - spent
       raise Error, "run budget exhausted; unresolved calls retain their reserved cost" unless available > 0.001
       budget = [config["call_budget_usd"], available].min
       profiles = config["profiles"].fetch("instructions", []) + config["profiles"].fetch(role, [])
-      prompt = File.read(File.join(ROOT, "prompts", "#{role}.md")) + "\n\n" + JSON.generate(
-        "preferences_and_skills" => profiles, "inputs" => inputs, "human_answers" => @run.state["answers"])
+      prompt = File.read(File.join(ROOT, "prompts", "#{role}.md")) + "\n\n" + JSON.generate({
+        "preferences_and_skills" => profiles, "inputs" => inputs, "human_answers" => @run.state["answers"],
+        "previous_output_refused_because" => cached && cached["refused"]}.compact)
       # A new entry is used on retries, retaining any previous unknown charge.
       reservation = "#{key}:#{SecureRandom.uuid}"
       before = @git.fingerprint(cwd)
@@ -50,7 +53,7 @@ module Giraffe
       record(reservation, {"role" => role, "charge" => usage["cost_usd"], "state" => "finished", "usage" => usage})
       Schema.validate!(schema, result.fetch("output"))
       record(key, {"role" => role, "charge" => 0.0, "output" => result["output"]})
-      questions!(result["output"], role, attempt, key)
+      deliver(result["output"], role, attempt, key, &accept)
     rescue Error => error
       usage = error.usage
       record(reservation, {"role" => role, "charge" => usage["cost_usd"], "state" => "failed", "usage" => usage}) if reservation && usage && billable?(usage["cost_usd"])
@@ -62,6 +65,16 @@ module Giraffe
     def billable?(cost) = cost.is_a?(Numeric) && cost.finite? && cost >= 0
 
     def record(key, value) = @run.checkpoint_entry("calls", key, value)
+
+    def deliver(output, role, attempt, key)
+      questions!(output, role, attempt, key)
+      yield output if block_given?
+      output
+    rescue InvalidOutput, PrGraph::OutcomeContract::OutcomeError, PrGraph::ReproContract::ReproError,
+           PrGraph::AcAuditContract::AuditError, PrGraph::SpecAuditContract::SpecAuditError => error
+      record(key, {"role" => role, "charge" => 0.0, "refused" => error.message})
+      raise
+    end
 
     def questions!(output, role, attempt, key)
       return output if output.fetch("questions").empty?

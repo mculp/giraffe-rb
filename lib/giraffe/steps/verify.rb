@@ -3,6 +3,9 @@
 module Giraffe
   module Steps
     module Verify
+      SOURCE_FILE = /\.(rb|[jt]sx?|py|go|rs|java|ex|exs)\z/
+      TEST_TREE = %r{(\A|/)(spec|tests?|__tests__)/}
+
       def step_verify
         candidate = @git.head(worktree)
         @git.clean!(worktree)
@@ -35,11 +38,21 @@ module Giraffe
       # Fills in the audits and returns why the candidate does not pass them, or nil.
       def audit_candidate(content, candidate, checks)
         # Deliberately exclude the implementation and test plans from the acceptance call.
-        audit = ask("audit", {"triage_brief" => artifact("triage_brief"), "diff" => @git.diff(worktree, base_sha), "checks" => checks})
-        content["ac_audit"] = audit.slice("clauses", "missed").merge("candidate_sha" => candidate, "inputs" => ["triage_brief"])
+        audit = ask("audit", {"triage_brief" => artifact("triage_brief"), "diff" => @git.diff(worktree, base_sha), "checks" => checks}) do |output|
+          content["ac_audit"] = output.slice("clauses", "missed").merge("candidate_sha" => candidate, "inputs" => ["triage_brief"])
+          ac_audit_contract.validate_shape!(content, clause_ids: clause_ids, candidate_sha: candidate)
+        end
         content["spec_audit"], content["mutation_proofs"] = audit_specs(candidate)
-        content["regression"] = regression(candidate) if artifact("repro_report")["status"] == "reproduced"
+        content["regression"] = regression(candidate) if regression_spec_written?(candidate)
         contract_rejection(content, audit)
+      end
+
+      # A reproduced bug owes a regression spec the candidate adds or changes. Without one there is no run to
+      # record, so the contract sends VERIFY red for BUILD to write it.
+      def regression_spec_written?(candidate)
+        report = artifact("repro_report")
+        return false unless report["status"] == "reproduced"
+        @git.call(worktree, "diff", "--name-only", "--diff-filter=AMR", base_sha, candidate).lines.map(&:strip).include?(report.fetch("rerun"))
       end
 
       def contract_rejection(content, audit)
@@ -61,9 +74,22 @@ module Giraffe
         section = {"candidate_sha" => candidate, "base_sha" => base_sha, "specs" => []}
         paths = PrGraph::SpecAuditContract.changed_spec_paths(worktree, base_sha, candidate)
         return section, [] if paths.empty?
-        specs = ask("spec_audit", {"test_plan" => artifact("test_plan"), "diff" => @git.diff(worktree, base_sha), "changed_specs" => paths}).fetch("specs")
+        proofs = []
+        ask("spec_audit", {"test_plan" => artifact("test_plan"), "diff" => @git.diff(worktree, base_sha), "changed_specs" => paths}) do |output|
+          specs = output.fetch("specs")
+          proofs = mutation_proofs(specs, candidate, paths)
+          audited = specs.zip(proofs).map do |spec, proof|
+            spec.slice("ref", "behavior", "classes").merge("mutation" => {"change" => spec.fetch("patch"), "result" => proof["exit_code"].zero? ? "pass" : "fail"})
+          end
+          section = section.merge("specs" => audited)
+          spec_audit_contract.validate_shape!({"spec_audit" => section}, candidate_sha: candidate, base_sha: base_sha, spec_paths: paths)
+        end
+        [section, proofs]
+      end
+
+      def mutation_proofs(specs, candidate, paths)
         baselines = {}
-        proofs = @git.at_commit(worktree, candidate) do |tree|
+        @git.at_commit(worktree, candidate) do |tree|
           specs.map do |spec|
             mutation_proof(spec, tree, paths, baselines).tap do
               @git.call(tree, "reset", "--hard", candidate)
@@ -71,24 +97,24 @@ module Giraffe
             end
           end
         end
-        audited = specs.zip(proofs).map do |spec, proof|
-          spec.slice("ref", "behavior", "classes").merge("mutation" => {"change" => spec.fetch("patch"), "result" => proof["exit_code"].zero? ? "pass" : "fail"})
-        end
-        [section.merge("specs" => audited), proofs]
       end
 
       def mutation_proof(spec, tree, paths, baselines)
         path, line = spec.fetch("ref").split(":", 2)
-        raise Error, "spec audit must cite a real changed spec and line" unless paths.include?(path) && line.to_s.match?(/\A[1-9][0-9]*\z/) && line.to_i <= File.readlines(safe_file(worktree, path)).length
+        raise InvalidOutput, "spec audit must cite a real changed spec and line: #{spec['ref']}" unless paths.include?(path) && line.to_s.match?(/\A[1-9][0-9]*\z/) && line.to_i <= File.readlines(safe_file(worktree, path)).length
         command = spec_command(spec["ref"])
         baseline = baselines[command] ||= @checks.run(worktree, [command]).first
-        raise Error, "spec audit baseline failed" unless baseline["exit_code"].zero?
+        raise InvalidOutput, "spec audit baseline failed: #{spec['ref']}" unless baseline["exit_code"].zero?
         @git.apply(tree, spec.fetch("patch"))
-        changed = @git.call(tree, "diff", "--name-only").lines.map(&:strip)
-        if changed.empty? || changed.any? { |name| PrGraph::SpecAuditContract.spec_path?(name) || name.start_with?(".") || !name.match?(/\.(rb|[jt]sx?|py|go|rs|java|ex|exs)\z/) }
-          raise Error, "mutation must change production source only"
-        end
+        changed = @git.changed_paths(tree, ignored: true)
+        raise InvalidOutput, "mutation changed nothing: #{spec['ref']}" if changed.empty?
+        outside = changed.reject { |name| production_source?(name) }
+        raise InvalidOutput, "mutation must change production source only: #{outside.join(', ')}" if outside.any?
         @checks.run(tree, [command]).first
+      end
+
+      def production_source?(path)
+        path.match?(SOURCE_FILE) && !path.start_with?(".") && !path.match?(TEST_TREE) && !PrGraph::SpecAuditContract.spec_path?(path)
       end
 
       def regression(candidate)
