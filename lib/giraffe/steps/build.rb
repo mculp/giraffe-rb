@@ -7,10 +7,10 @@ module Giraffe
 
       def step_build
         @git.clean!(worktree)
-        if attempted_artifact("build_manifest") && attempted_artifact("self_review")
-          finish
-          return
+        if (saved_review = attempted_artifact("self_review"))
+          return resume_reviewed_build(saved_review)
         end
+
         plan = artifact("implementation_plan")
         units = plan.fetch("steps")
         if (feedback = runtime["verification_feedback"])
@@ -33,17 +33,33 @@ module Giraffe
           blocking = review.fetch("findings").select { |finding| finding["severity"] == "blocking" }
           if blocking.empty? && checks.all? { |check| check["exit_code"].zero? }
             raise Error, "BUILD produced no change from the base" if candidate == base_sha
-            # The review first: resuming asks for it again word for word, but checks rarely print the same twice.
+            # Save the completed review first so recovery can reuse its full history without another model call.
             put("self_review", {"candidate_sha" => candidate, "reviews" => reviews}, candidate: candidate,
                 perspective: "independent_review", covered: clause_ids)
-            put("build_manifest", {"candidate_sha" => candidate, "base_sha" => base_sha,
-                                   "steps" => units.map { |unit| unit["id"] }, "checks" => checks}, candidate: candidate, covered: clause_ids)
+            put_build_manifest(candidate, units, checks)
             finish
             return
           end
           write_batch("fix-#{round}", {"findings" => blocking, "failed_checks" => checks.reject { |check| check["exit_code"].zero? }})
         end
         raise Error, "BUILD reached its fix-round limit; the writer remains open for inspection"
+      end
+
+      def resume_reviewed_build(review)
+        candidate = review.fetch("candidate_sha")
+        raise Error, "saved BUILD review belongs to a different candidate" unless @git.head(worktree) == candidate
+
+        unless attempted_artifact("build_manifest")
+          checks = read_only_checks
+          raise Error, "saved BUILD candidate no longer passes checks" unless checks.all? { |check| check["exit_code"].zero? }
+          put_build_manifest(candidate, artifact("implementation_plan").fetch("steps"), checks)
+        end
+        finish
+      end
+
+      def put_build_manifest(candidate, units, checks)
+        put("build_manifest", {"candidate_sha" => candidate, "base_sha" => base_sha,
+                               "steps" => units.map { |unit| unit["id"] }, "checks" => checks}, candidate: candidate, covered: clause_ids)
       end
 
       def write_batch(unit, assignment)

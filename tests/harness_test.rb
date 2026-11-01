@@ -1011,6 +1011,28 @@ class HarnessTest < Minitest::Test
     assert_equal "fail", verification_of(run).dig("spec_audit", "specs", 0, "mutation", "result")
   end
 
+  def test_mutation_cannot_edit_a_spec_helper_already_changed_by_a_checkout_hook
+    FileUtils.mkdir_p(File.join(@repo, "test"))
+    File.write(File.join(@repo, "test/helper.rb"), "FAIL = false # original\n")
+    commit_base("spec helper")
+    install_hook("echo 'FAIL = false # bootstrapped' > test/helper.rb")
+    checks = Giraffe::Checks.new(config)
+    command = [RbConfig.ruby, "-r", "./test/helper", "-e", "abort 'injected failure' if FAIL"]
+
+    ["FAIL = true # bootstrapped", "FAIL = false # original"].each do |replacement|
+      patch = app_patch("puts 'base' # harmless production edit") + <<~PATCH
+        diff --git a/test/helper.rb b/test/helper.rb
+        --- a/test/helper.rb
+        +++ b/test/helper.rb
+        @@ -1 +1 @@
+        -FAIL = false # bootstrapped
+        +#{replacement}
+      PATCH
+      error = assert_raises(Giraffe::InvalidOutput) { mutation_runner(checks).prove(patch, command) }
+      assert_includes error.message, "test/helper.rb"
+    end
+  end
+
   def test_what_a_hook_leaves_cannot_pass_for_a_mutation
     File.write(File.join(@repo, "manifest.rb"), "")
     commit_base("manifest")
@@ -1081,16 +1103,29 @@ class HarnessTest < Minitest::Test
 
   class Crash < Exception; end
 
-  def test_crash_between_builds_two_saves_resumes_though_check_output_changed
+  def test_crash_between_builds_two_saves_preserves_the_review_history_after_a_fix
     %w[self_review build_manifest].each do |family|
       crashing = Class.new(Giraffe::Harness) do
         define_method(:put) { |name, *args, **options| super(name, *args, **options).tap { raise Crash if name == family } }
       end
-      runner = Giraffe::Runners::Scripted.new(script)
+      data = script
+      data["review"].unshift({"questions" => [], "summary" => "Needs a fix", "findings" => [
+        {"id" => "greeting", "severity" => "blocking", "file" => "app.rb", "reason" => "Adjust the greeting"}
+      ]})
+      data["build"] << {"output" => {"questions" => [], "summary" => "Addressed review"}, "writes" => {"app.rb" => "puts 'fixed again'\n"}}
+      runner = Giraffe::Runners::Scripted.new(data)
       run = start(checks: [[RbConfig.ruby, "-e", "puts Process.clock_gettime(Process::CLOCK_MONOTONIC); #{'abort "wrong" unless File.read("app.rb").include?("fixed")'}"]])
       assert_raises(Crash) { crashing.new(run, runner: runner, github: @github).run }
-      execute(Giraffe::Run.load(run.path), runner)
-      assert_equal "draft_pr", Giraffe::Run.load(run.path).state["status"], "after a crash following #{family}"
+      saved = run.coordinator.snapshot["artifacts"].find { |row| row["family"] == "self_review" }
+      review_path = File.join(run.directory, saved.fetch("content_ref"))
+      review = File.read(review_path)
+      assert_equal 2, JSON.parse(review).fetch("reviews").length
+
+      resumed = Giraffe::Run.load(run.path)
+      execute(resumed, runner)
+      assert_equal "draft_pr", resumed.state["status"], "after a crash following #{family}"
+      assert_equal review, File.read(review_path)
+      assert_equal 2, runner.calls.count { |call| call[:step] == "review" }, "the saved review needs no further model call"
     end
   end
 

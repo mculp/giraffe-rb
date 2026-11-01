@@ -29,12 +29,15 @@ module Giraffe
     # Only the patch can say: a new file somewhere ignored would not show in the applied tree.
     def refuse_new_files!(patch) = refuse!(@git.patch_paths(@worktree, patch) - @git.tracked_paths(@worktree))
 
-    # Only the applied tree can say: a rename's source is not among the paths a patch reports. What a checkout's
-    # hook had already changed is neither the mutation's doing nor proof of one.
+    # Compare file states so a patch cannot hide another edit behind a hook's existing change.
+    # Keep paths that disappeared from status too: the patch may have restored a hook's output to HEAD.
     def apply_mutation(tree, patch)
-      left_by_checkout = @git.changed_paths(tree)
+      before = @git.changed_file_states(tree)
       @git.apply(tree, patch)
-      changed = @git.changed_paths(tree) - left_by_checkout
+      after = @git.changed_file_states(tree)
+      changed = (before.keys | after.keys).select do |path|
+        before.fetch(path, :unchanged) != after.fetch(path, :unchanged)
+      end
       raise InvalidOutput, "mutation changed nothing" if changed.empty?
       refuse!(changed.reject(&@production))
     end

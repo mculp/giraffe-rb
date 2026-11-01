@@ -109,6 +109,10 @@ module Giraffe
       paths.compact
     end
 
+    def changed_file_states(repo)
+      changed_paths(repo).to_h { |path| [path, file_state(File.join(repo, path))] }
+    end
+
     def at_commit(repo, sha)
       Dir.mktmpdir("giraffe-proof-") do |directory|
         target = File.join(directory, "tree")
@@ -122,6 +126,18 @@ module Giraffe
     end
 
     private
+
+    def file_state(path)
+      stat = File.lstat(path)
+      content = if stat.symlink?
+                  File.readlink(path)
+                elsif stat.file?
+                  Digest::SHA256.file(path).hexdigest
+                end
+      [stat.ftype, stat.mode, content]
+    rescue Errno::ENOENT, Errno::ENOTDIR
+      nil
+    end
 
     # A worktree found here never finished being made: its hook failed, or died with the machine, so it lacks what
     # the hook provides. Nothing leads back to WORKTREE once it finishes, so nothing has worked in this one.
