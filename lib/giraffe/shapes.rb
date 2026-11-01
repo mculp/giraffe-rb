@@ -17,6 +17,7 @@ module PrGraph
     ARTIFACT_LOG = "giraffe-run-artifact-log"
     FAILURE_LOG = "giraffe-run-failure-log"
     MANIFEST = "giraffe-run-manifest"
+    HARNESS = "giraffe-harness-state"
     DIALECT = "https://json-schema.org/draft/2020-12/schema"
     # JSON Schema keeps these as patterns. They stay inside the dialect Temper and Ruby share: no \d, no
     # inline flags, and a case-insensitive class spelled out.
@@ -62,11 +63,20 @@ module PrGraph
           branch(name, {"required" => spec.fetch("required"), "properties" => {}}, {"required" => failure.dig("envelope", "required"),
                  "properties" => execution.dig("envelope", "properties")}, lookup)
         end),
-        MANIFEST => object({"name" => {"type" => "string", "minLength" => 1}, "text" => {"type" => "string"}})
+        MANIFEST => object({"name" => {"type" => "string", "minLength" => 1}, "text" => {"type" => "string"}}),
+        HARNESS => object({"version" => {"const" => 1}, "run_id" => {"type" => "string", "pattern" => PATTERNS.fetch("uuid")},
+                           "revision" => {"type" => "integer", "minimum" => 1}, "session" => {"type" => "string"},
+                           "config" => {"type" => "object"}, "ticket" => {"type" => "object"},
+                           "status" => {"type" => "string"}, "questions" => {"type" => "array"},
+                           "answers" => {"type" => "object"}, "created_at" => {"type" => "string"},
+                           "error" => {"type" => ["string", "null"]}, "runtime" => {"type" => "object"}})
       }
       families.each do |family|
-        kinds[family_kind(family)] = object({"record" => record, "content" => {"type" => "string"}})
+        family_record = Marshal.load(Marshal.dump(record))
+        family_record["properties"]["family"] = {"const" => family}
+        kinds[family_kind(family)] = object({"record" => family_record, "content" => {"type" => "string"}})
       end
+      kinds["giraffe-harness-live"] = kinds.fetch(HARNESS)
       kinds.transform_values do |schema|
         {"$schema" => DIALECT, "title" => "giraffe run store #{Digest::SHA256.hexdigest(JSON.generate(schema))[0, 16]}"}.merge(schema)
       end

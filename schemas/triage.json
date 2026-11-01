@@ -1,0 +1,157 @@
+{
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "questions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1
+        }
+      },
+      "required": [
+        "questions"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "questions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "maxItems": 0
+        },
+        "outcome_register": {
+          "type": "object",
+          "properties": {
+            "why": {
+              "type": "string",
+              "minLength": 1
+            },
+            "actors": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "situation": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "id",
+                  "situation"
+                ],
+                "additionalProperties": false
+              },
+              "minItems": 1
+            },
+            "positive_postconditions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "statement": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "id",
+                  "statement"
+                ],
+                "additionalProperties": false
+              },
+              "minItems": 1
+            },
+            "negative_face": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "statement": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "id",
+                  "statement"
+                ],
+                "additionalProperties": false
+              },
+              "minItems": 1
+            },
+            "declared_gaps": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "id",
+                  "reason"
+                ],
+                "additionalProperties": false
+              },
+              "minItems": 0
+            }
+          },
+          "required": [
+            "why",
+            "actors",
+            "positive_postconditions",
+            "negative_face",
+            "declared_gaps"
+          ],
+          "additionalProperties": false
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ui": {
+          "type": "boolean"
+        },
+        "bug": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "questions",
+        "outcome_register",
+        "summary",
+        "ui",
+        "bug"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

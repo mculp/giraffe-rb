@@ -427,6 +427,28 @@ module PrGraph
       end
     end
 
+    # Validated local projection without contacting GitHub or requiring the old worktree.
+    # Used by the harness and by Store before installing a recovered run.
+    def snapshot
+      with_lock { load_state }
+    end
+
+    def read_view
+      with_lock do
+        state = load_state
+        projection = begin
+          resume_projection(state, worktree: nil, offline: true)
+        rescue CoordinatorError => error
+          # A UI must still explain a paused mutation violation. This view grants no transitions;
+          # start/check/complete retain their normal checks.
+          {"current_candidate" => current_candidate(state), "terminal" => state.fetch("terminal"),
+           "runnable" => [], "blocked" => policy.fetch("nodes").keys.to_h { |node| [node, [error.message]] },
+           "validation_error" => error.message}
+        end
+        {"state" => state, "projection" => projection}
+      end
+    end
+
     private
 
     def error!(message)
