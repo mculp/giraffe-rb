@@ -6,6 +6,7 @@ require_relative "git"
 require_relative "checks"
 require_relative "model"
 require_relative "mutation_runner"
+require_relative "screen_checks"
 require_relative "runners/claude"
 require_relative "runners/scripted"
 require_relative "steps/preparation"
@@ -124,6 +125,12 @@ module Giraffe
       request = Model::Request.new(role: role, attempt: @attempt, unit: unit, cwd: cwd, writable: writable,
                                    inputs: {"ticket" => @run.state["ticket"]}.merge(inputs))
       @model.call(request, &accept)
+    end
+
+    # What a step has no edit or evidence for is a person's to settle. The step stays open; the answer reaches its next call.
+    def ask_a_person(id, text)
+      @run.update(status: "waiting_for_answers", questions: [{"id" => id, "text" => text, "role" => @node.downcase, "attempt_id" => @attempt}])
+      raise Parked, "waiting for a person's answer"
     end
 
     # The graph after finishing any result a crash left half recorded.

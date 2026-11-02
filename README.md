@@ -39,8 +39,9 @@ bin/test
 ```
 
 The tests use temporary directories and fakes for `gh` and Temper, so they reach no real run
-state, GitHub, or Temper. CI (`.github/workflows/test.yml`) runs `bin/test` on every PR and every
-push to `main`.
+state, GitHub, or Temper. One test draws a fixture in real Chrome and skips where there is none, and
+the sandbox's test skips off macOS. CI (`.github/workflows/test.yml`) runs `bin/test` on every PR
+and every push to `main`.
 
 New tests should catch failures that lose work, publish unverified changes, corrupt evidence, or
 break recovery. Prefer observable outcomes with real temporary Git repositories and executable

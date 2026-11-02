@@ -181,12 +181,43 @@
             ]
           },
           "minItems": 0
+        },
+        "screens": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "verdict": {
+                "type": "string",
+                "enum": [
+                  "fits",
+                  "broken"
+                ]
+              },
+              "note": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "name",
+              "verdict",
+              "note"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 0
         }
       },
       "required": [
         "questions",
         "clauses",
-        "missed"
+        "missed",
+        "screens"
       ],
       "additionalProperties": false
     }

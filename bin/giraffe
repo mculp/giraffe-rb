@@ -29,7 +29,7 @@ begin
              ticket = Giraffe::Tickets.load(identifier: ARGV.shift, file: options[:ticket_file])
              if config["dry_run"]
                {"status" => "dry_run", "ticket" => ticket["id"], "repo" => config["repo"], "base" => config["base"],
-                "steps" => Giraffe::Harness::ORDER, "checks" => config["checks"]}
+                "steps" => Giraffe::Harness::ORDER, "checks" => config["checks"], "screen_checks" => config["screen_checks"]}
              else
                run = Giraffe::Run.start(config, ticket)
                Giraffe::Harness.new(run).run

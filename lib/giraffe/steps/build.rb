@@ -64,10 +64,10 @@ module Giraffe
         return unless @git.head(worktree) == feedback.fetch("candidate_sha") && @run.state["answers"].size == feedback["answers_seen"]
         open_clauses = feedback.dig("ac_audit", "clauses").to_a.reject { |row| row["verdict"] == "met" }
         details = open_clauses.map { |row| "#{row['clause_id']}: #{row['reason']}" }.join(" ")
-        text = "VERIFY stays red and BUILD found no edit to make: #{feedback.fetch('reason')}. #{details} " \
-               "Please answer with evidence, such as what a command printed on #{feedback.fetch('candidate_sha')}, or with what should change."
-        @run.update(status: "waiting_for_answers", questions: [{"id" => "verification-#{@attempt}", "text" => text, "role" => "build", "attempt_id" => @attempt}])
-        raise Parked, "waiting for a person's answer"
+        pictures = feedback["screenshots"].to_a.map { |shot| shot["path"] }
+        ask_a_person("verification-#{@attempt}", "VERIFY stays red and BUILD found no edit to make: #{feedback.fetch('reason')}. #{details} " \
+                                                 "#{"Its screenshots are #{pictures.join(', ')}. " if pictures.any?}" \
+                                                 "Please answer with evidence, such as what a command printed on #{feedback.fetch('candidate_sha')}, or with what should change.")
       end
 
       def put_build_manifest(candidate, units, checks)
