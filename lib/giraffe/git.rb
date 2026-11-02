@@ -162,8 +162,9 @@ module Giraffe
       call(repo, "worktree", "remove", "--force", "--force", path)
     end
 
+    # A hunk that ends on its changed line is taken to end the file unless told otherwise, and a model writes those.
     def run_patch(repo, patch, *options)
-      result = @command.capture(["git", "apply", *options, "-"], cwd: repo, input: patch)
+      result = @command.capture(["git", "apply", "--unidiff-zero", *options, "-"], cwd: repo, input: patch)
       raise PatchRejected, "patch does not apply: #{result['stderr'].lines.first.to_s.strip}" unless result["status"].zero?
       result["stdout"]
     end

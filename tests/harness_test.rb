@@ -642,15 +642,58 @@ class HarnessTest < Minitest::Test
     assert_includes @runner.calls.select { |call| call[:step] == "build" }.last[:prompt], "clean checkout"
   end
 
-  def test_red_on_an_unchanged_candidate_reaches_the_recurrence_stop
+  def unverifiable_audit(data)
+    copy(data["audit"][0]).tap do |audit|
+      audit["clauses"][0] = {"clause_id" => clauses[0], "verdict" => "unverifiable", "reason" => "Cannot tell from here"}
+    end
+  end
+
+  def test_red_that_build_has_no_edit_for_asks_a_person_and_the_audit_hears_the_answer
     data = script
-    unsure = copy(data["audit"][0])
-    unsure["clauses"][0] = {"clause_id" => clauses[0], "verdict" => "unverifiable", "reason" => "Cannot tell from here"}
-    data["audit"] = [unsure] * 6
+    data["audit"] = [unverifiable_audit(data), data["audit"][0]]
+    data["review"] *= 2
+    data["build"] << {"output" => {"questions" => [], "summary" => "Nothing to change"}}
+    runner = Giraffe::Runners::Scripted.new(data)
+    run = start
+    execute(run, runner)
+    assert_equal "waiting_for_answers", run.state["status"]
+    question = run.state["questions"].first
+    assert_includes question["text"], "Cannot tell from here"
+    assert_includes question["text"], run.coordinator.snapshot["artifacts"].find { |row| row["family"] == "verification" }["candidate_sha"]
+    assert_equal 1, runner.calls.count { |call| call[:step] == "audit" }
+    run.answer(question["id"], "The browser suite passed on this candidate")
+    execute(run, runner)
+    assert_equal "draft_pr", run.state["status"]
+    assert_includes runner.calls.select { |call| call[:step] == "audit" }.last[:prompt], "browser suite passed"
+  end
+
+  def test_red_build_asked_about_itself_is_not_asked_again_once_answered
+    data = script
+    data["audit"] = [unverifiable_audit(data), data["audit"][0]]
+    data["review"] *= 2
+    data["build"] += [{"output" => {"questions" => ["Can someone run the browser suite?"]}}, {"output" => {"questions" => [], "summary" => "Nothing to change"}}]
+    runner = Giraffe::Runners::Scripted.new(data)
+    run = start
+    execute(run, runner)
+    question = run.state["questions"].first
+    assert_equal "Can someone run the browser suite?", question["text"]
+    run.answer(question["id"], "It passed on this candidate")
+    execute(run, runner)
+    assert_equal "draft_pr", run.state["status"]
+  end
+
+  def test_red_an_answer_does_not_settle_reaches_the_recurrence_stop
+    data = script
+    data["audit"] = [unverifiable_audit(data)] * 6
     data["review"] *= 6
     data["build"] += Array.new(5) { {"output" => {"questions" => [], "summary" => "Nothing to change"}} }
+    runner = Giraffe::Runners::Scripted.new(data)
     run = start
-    error = assert_raises(PrGraph::Coordinator::CoordinatorError) { execute(run, data) }
+    3.times do
+      execute(run, runner)
+      run.answer(run.state["questions"].first["id"], "I cannot tell either")
+    end
+    error = assert_raises(PrGraph::Coordinator::CoordinatorError) { execute(run, runner) }
     assert_match(/recurring failure.*verification.*remain unverifiable/, error.message)
     assert_equal "paused", run.state["status"]
     assert run.coordinator.snapshot.dig("failure_queue", "stopped")
@@ -1011,6 +1054,14 @@ class HarnessTest < Minitest::Test
     assert_equal "fail", verification_of(run).dig("spec_audit", "specs", 0, "mutation", "result")
   end
 
+  def test_a_patch_ending_on_its_changed_line_applies_mid_file
+    File.write(File.join(@repo, "long.rb"), "one\ntwo\nthree\nfour\n")
+    commit_base("long file")
+    patch = "diff --git a/long.rb b/long.rb\n--- a/long.rb\n+++ b/long.rb\n@@ -2,2 +2,2 @@\n two\n-three\n+THREE\n"
+    Giraffe::Git.new.apply(@repo, patch)
+    assert_equal "one\ntwo\nTHREE\nfour\n", File.read(File.join(@repo, "long.rb"))
+  end
+
   def test_mutation_cannot_edit_a_spec_helper_already_changed_by_a_checkout_hook
     FileUtils.mkdir_p(File.join(@repo, "test"))
     File.write(File.join(@repo, "test/helper.rb"), "FAIL = false # original\n")
@@ -1077,7 +1128,8 @@ class HarnessTest < Minitest::Test
     first = copy(data["audit"][0])
     first["clauses"][0] = {"clause_id" => clauses[0], "verdict" => "unmet", "reason" => "Greeting needs another adjustment"}
     data["audit"] = [first, data["audit"][0]]
-    data["build"] << {"output" => {"questions" => [], "summary" => "Addressed acceptance finding"}}
+    fixed = data["build"][0]["writes"].fetch("app.rb")
+    data["build"] << {"output" => {"questions" => [], "summary" => "Addressed acceptance finding"}, "writes" => {"app.rb" => "#{fixed.chomp}\n# adjusted\n"}}
     data["review"] << data["review"][0]
     data["spec_audit"] << data["spec_audit"][0]
     run = start_bug
