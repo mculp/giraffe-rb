@@ -4,8 +4,11 @@ require "minitest/autorun"
 require "tmpdir"
 require "fileutils"
 require "rbconfig"
+require "socket"
+require "etc"
 require_relative "../lib/giraffe/harness"
 require_relative "../lib/giraffe/graph_view"
+require_relative "fixtures/screens/fit_check"
 
 class HarnessTest < Minitest::Test
   ROOT = File.expand_path("..", __dir__)
@@ -86,7 +89,7 @@ class HarnessTest < Minitest::Test
        "test_plan" => {"coverage" => clauses.map { |id| {"outcome_id" => id, "status" => "planned", "planned_node" => "VERIFY", "strategy" => "Execute the greeting check"} }}}],
      "build" => [{"output" => {"questions" => [], "summary" => "Updated greeting"}, "writes" => {"app.rb" => "puts 'fixed'\n"}}],
      "review" => [{"questions" => [], "summary" => "No blocking findings", "findings" => []}],
-     "audit" => [{"questions" => [], "clauses" => clauses.map { |id| {"clause_id" => id, "verdict" => "met", "evidence" => [{"ref" => "app.rb:1", "note" => "Executed checks pass"}]} }, "missed" => []}],
+     "audit" => [{"questions" => [], "clauses" => clauses.map { |id| {"clause_id" => id, "verdict" => "met", "evidence" => [{"ref" => "app.rb:1", "note" => "Executed checks pass"}]} }, "missed" => [], "screens" => []}],
      "pr_body" => [{"questions" => [], "title" => "Show requested greeting", "body" => "## Description\nChanges greeting.\n\n## Notes\nExecutable checks passed."}]}
   end
 
@@ -183,6 +186,7 @@ class HarnessTest < Minitest::Test
     assert_match(/naming \{spec\}/, assert_raises(Giraffe::Error) { config(spec_command: ["rspec"]) }.message)
     assert_match(/naming \{spec\}/, assert_raises(Giraffe::Error) { config(spec_command: ["{spec}", 1]) }.message)
     assert_match(/--flag=\{line\}/, assert_raises(Giraffe::Error) { config(spec_command: ["rspec", "{spec}", "--line", "{line}"]) }.message)
+    assert_match(/screen_checks/, assert_raises(Giraffe::Error) { config(screen_checks: "npm run horde") }.message)
   end
 
   def test_verifier_that_changes_tracked_file_cannot_publish
@@ -698,6 +702,203 @@ class HarnessTest < Minitest::Test
     assert_equal "paused", run.state["status"]
     assert run.coordinator.snapshot.dig("failure_queue", "stopped")
     assert_empty @github.calls
+  end
+
+  # A screen check that draws the named pictures, the way a browser suite's --shots does.
+  def draws(*names)
+    [RbConfig.ruby, "-e", "%w[#{names.join(' ')}].each { |name| File.binwrite(File.join(ARGV[0], name), 'picture of ' + name) }", "{shots}"]
+  end
+
+  def ruled(*rows) = copy(script["audit"][0]).merge("screens" => rows)
+  def looks_fine(name) = {"name" => name, "verdict" => "fits", "note" => "All of it is on the screen"}
+  def looks_broken(name, note) = {"name" => name, "verdict" => "broken", "note" => note}
+  def calls_to(role) = @runner.calls.select { |call| call[:step] == role }
+  def edit(summary, content) = {"output" => {"questions" => [], "summary" => summary}, "writes" => {"app.rb" => content}}
+
+  # The cut-down HUD of the first version of CHUNKY-22, in real Chrome through the real macOS sandbox. Every gate
+  # passed it. A person found it in a screenshot, and its fix, 81d2a72, measures what this fixture does.
+  def test_the_line_that_ran_off_a_phone_at_695756d_cannot_reach_a_draft
+    skip "no Chrome here to draw with" unless ScreenFit.chrome
+    fixture = ->(name) { File.read(File.join(ROOT, "tests/fixtures/screens", name), encoding: "UTF-8") }
+    data = script
+    data["build"][0]["writes"].merge!("hud.html" => fixture["hud_695756d.html"], "fit_check.rb" => fixture["fit_check.rb"])
+    data["build"] << {"output" => {"questions" => [], "summary" => "Two short rows"}, "writes" => {"hud.html" => fixture["hud_81d2a72.html"]}}
+    data["review"] *= 2
+    data["audit"] = [ruled(looks_fine("hud-320.png"), looks_fine("hud-390.png"))]
+    check = [RbConfig.ruby, "fit_check.rb", "hud.html", "{shots}"]
+    run = start(screen_checks: [check], sandbox_checks: RbConfig::CONFIG["host_os"].include?("darwin"))
+    execute(run, data)
+    verifications = run.coordinator.snapshot["artifacts"].select { |row| row["family"] == "verification" }
+    stopped = JSON.parse(File.read(File.join(run.directory, verifications.first["content_ref"])))
+    assert_equal 1, stopped["failures"]
+    assert_equal 1, stopped["checks"].last["exit_code"]
+    assert_match(/FAIL at 320 wide: "Hood up .* 100%" ends at \d+/, stopped["checks"].last["excerpt"])
+    assert_match(/FAIL at 320 wide/, calls_to("build").last[:prompt], "BUILD hears where the line ended")
+    assert_equal 1, calls_to("audit").length, "nothing is paid to audit a screen that does not fit"
+    assert_equal "draft_pr", run.state["status"]
+    refute_equal stopped["candidate_sha"], run.coordinator.snapshot["published"]["candidate_sha"]
+    assert_equal %w[hud-320.png hud-390.png], verification_of(run)["screenshots"].map { |shot| shot["name"] }
+    assert_equal "\x89PNG".b, File.binread(verification_of(run)["screenshots"].first["path"], 4), "they are real pictures"
+  end
+
+  def test_a_failing_screen_check_goes_red_before_an_audit_is_paid_for
+    data = script
+    data["build"] << edit("Made it fit", "puts 'fixed again'\n")
+    data["review"] *= 2
+    fits_once_fixed = [RbConfig.ruby, "-e", "abort 'it ends at 467 of 390' unless File.read('app.rb').include?('again')"]
+    run = start(screen_checks: [fits_once_fixed])
+    execute(run, data)
+    assert_equal "draft_pr", run.state["status"]
+    assert_equal 1, calls_to("audit").length
+    assert_includes calls_to("build").last[:prompt], "it ends at 467 of 390"
+    assert_equal 1, @github.calls.length
+  end
+
+  def test_what_a_screen_check_draws_is_kept_and_the_auditor_must_rule_on_each_picture
+    data = script
+    data["audit"] = [ruled(looks_fine("a.png"), looks_fine("b.png"))]
+    run = assert_resume_asks_again("audit", data, ruled(looks_fine("a.png")), /b\.png/, screen_checks: [draws("a.png", "b.png")], store: "mirrored")
+    shots = verification_of(run)["screenshots"]
+    assert_equal %w[a.png b.png], shots.map { |shot| shot["name"] }
+    assert_equal "picture of b.png", File.read(shots.last["path"])
+    assert_equal Digest::SHA256.hexdigest("picture of b.png"), shots.last["sha256"]
+    assert_includes calls_to("audit").last[:prompt], shots.last["path"]
+    assert_includes calls_to("plan").first[:prompt], "{shots}", "PLAN knows what will look at the screen"
+    assert_equal "{shots}", verification_of(run)["checks"].last["command"].last, "recorded as declared, not with a directory that is gone"
+    assert_empty @git.call(File.join(run.directory, "worktree"), "status", "--porcelain"), "they drew in a checkout of their own"
+    assert_equal [%w[a.png fits], %w[b.png fits]], verification_of(run)["screens"].map { |row| row.values_at("name", "verdict") }
+    assert_includes File.read(ENV["FAKE_TEMPER_CONTEXT"]), shots.last["sha256"], "the store knows which picture was ruled on"
+    refute_includes File.read(ENV["FAKE_TEMPER_CONTEXT"]), "picture of b.png", "but the picture stays on this host"
+  end
+
+  def test_a_link_a_candidate_planted_is_not_kept_as_a_picture
+    private_file = File.join(@tmp, "private.png")
+    File.write(private_file, "not for anyone")
+    plants = [RbConfig.ruby, "-e", "File.symlink(#{private_file.inspect}, File.join(ARGV[0], 'planted.png')); File.write(File.join(ARGV[0], 'real.png'), 'pixels')", "{shots}"]
+    data = script
+    data["audit"] = [ruled(looks_fine("real.png"))]
+    run = start(screen_checks: [plants])
+    execute(run, data)
+    assert_equal %w[real.png], verification_of(run)["screenshots"].map { |shot| shot["name"] }
+  end
+
+  def test_a_screen_ruled_broken_stops_the_draft_and_asks_a_person_to_look_at_that_picture
+    data = script
+    data["audit"] = [ruled(looks_broken("hood.png", "The line runs off the right edge")), ruled(looks_fine("hood.png"))]
+    data["review"] *= 2
+    data["build"] << {"output" => {"questions" => [], "summary" => "Nothing to change"}}
+    runner = Giraffe::Runners::Scripted.new(data)
+    run = start(screen_checks: [draws("hood.png")])
+    execute(run, runner)
+    assert_equal "waiting_for_answers", run.state["status"]
+    assert_empty @github.calls
+    picture = verification_of(run)["screenshots"].first["path"]
+    assert_includes calls_to("build").last[:prompt], "The line runs off the right edge"
+    assert_includes calls_to("build").last[:prompt], picture
+    question = run.state["questions"].first
+    assert_includes question["text"], "The line runs off the right edge"
+    assert_includes question["text"], picture
+    run.answer(question["id"], "That is a known leftover, fine for this ticket")
+    execute(run, runner)
+    assert_equal "draft_pr", run.state["status"]
+    assert_includes calls_to("audit").last[:prompt], "known leftover"
+  end
+
+  def test_a_ui_ticket_whose_screen_checks_drew_nothing_goes_red
+    data = script
+    data["plan"][0]["ui"] = true
+    data["build"] << edit("Took a screenshot of it", "puts 'fixed again'\n")
+    data["review"] *= 2
+    data["audit"] = [ruled(looks_fine("a.png"))]
+    draws_once_fixed = [RbConfig.ruby, "-e", "File.write(File.join(ARGV[0], 'a.png'), 'pixels') if File.read('app.rb').include?('again')", "{shots}"]
+    run = start(screen_checks: [draws_once_fixed])
+    execute(run, data)
+    assert_equal "draft_pr", run.state["status"]
+    assert_equal 2, run.coordinator.snapshot["attempts"].values.count { |attempt| attempt["node"] == "BUILD" }
+    assert_match(/no screenshot/, calls_to("build").last[:prompt])
+    assert_equal 1, calls_to("audit").length
+  end
+
+  # Triage's flag alone: PLAN saying otherwise does not make the screen visible to anything.
+  def test_a_ui_ticket_nothing_can_see_asks_a_person_to_look_at_each_candidate
+    data = script
+    data["triage"][0]["ui"] = true
+    broken = copy(data["audit"][0])
+    broken["clauses"][0] = {"clause_id" => clauses[0], "verdict" => "unmet", "reason" => "A person saw it run off the screen"}
+    data["audit"] = [broken, data["audit"][0]]
+    data["build"] << edit("Made it fit", "puts 'fixed again'\n")
+    data["review"] *= 2
+    runner = Giraffe::Runners::Scripted.new(data)
+    run = start
+    execute(run, runner)
+    assert_equal "waiting_for_answers", run.state["status"]
+    assert_empty calls_to("audit"), "a person looks before an audit is paid for"
+    first = run.state["questions"].first
+    worktree = File.join(run.directory, "worktree")
+    assert_includes first["text"], @git.head(worktree)
+    run.answer(first["id"], "It runs off the right edge at 390 wide")
+    execute(run, runner)
+    assert_includes calls_to("audit").first[:prompt], "runs off the right edge"
+    assert_equal "waiting_for_answers", run.state["status"]
+    second = run.state["questions"].first
+    assert_includes second["text"], @git.head(worktree), "what was seen on one candidate says nothing about the next"
+    refute_equal first["id"], second["id"]
+    run.answer(second["id"], "All of it is on the screen now")
+    execute(run, runner)
+    assert_equal "draft_pr", run.state["status"]
+    assert_equal 1, @github.calls.length
+  end
+
+  # With the network open, what a screen check can read can leave.
+  def test_a_screen_check_gets_the_network_and_little_of_the_home_directory
+    skip "the sandbox is macOS only" unless RbConfig::CONFIG["host_os"].include?("darwin")
+    home = File.join(File.realpath(@tmp), "home")
+    FileUtils.mkdir_p(%w[.ssh tool/bin tool/lib].map { |path| File.join(home, path) })
+    {".ssh/id" => "private", "notes.txt" => "private", "tool/lib/runtime" => "a tool's own file", "tool/credentials.toml" => "private", ".gitconfig" => "[user]\n"}.each { |path, text| File.write(File.join(home, path), text) }
+    ENV["HOME"] = home
+    ENV["PATH"] = "#{File.join(home, 'tool/bin')}:#{ENV['PATH']}"
+    server = TCPServer.new("127.0.0.1", 0)
+    connects = [RbConfig.ruby, "-rsocket", "-e", "TCPSocket.new('127.0.0.1', #{server.addr[1]})"]
+    reads = ->(path) { [RbConfig.ruby, "-e", "File.read(#{File.join(home, path).inspect})"] }
+    outside = File.join(Etc.getpwuid.dir, ".giraffe-sandbox-probe-#{Process.pid}")
+    writes_outside = [RbConfig.ruby, "-e", "File.write(#{outside.inspect}, 'x')"]
+    checks = Giraffe::Checks.new(config(sandbox_checks: true), command: @command)
+    plain = ->(command) { checks.run(@repo, [command]).first["exit_code"] }
+    open = ->(command) { checks.run(@repo, [command], network: true).first["exit_code"] }
+
+    refute_equal 0, plain[connects], "an ordinary check stays off the network"
+    assert_equal 0, plain[reads["notes.txt"]], "and reads as it always has"
+    refute_equal 0, plain[reads[".ssh/id"]]
+
+    assert_equal 0, open[connects]
+    refute_equal 0, open[reads["notes.txt"]]
+    refute_equal 0, open[reads[".ssh/id"]]
+    assert_equal 0, open[reads["tool/lib/runtime"]], "the libraries beside a tool on its PATH stay readable"
+    refute_equal 0, open[reads["tool/credentials.toml"]], "and nothing else beside it does"
+    assert_equal 0, open[reads[".gitconfig"]], "git dies without it"
+    refute_equal 0, open[writes_outside]
+    refute File.exist?(outside)
+  ensure
+    server&.close
+    FileUtils.rm_f(outside) if outside
+  end
+
+  # A process asks the keychain's services for a token, so no file rule covers it. No password is read here: there is
+  # no such item. A search the services refuse says it was not valid, and one they answer only that nothing was found.
+  def test_no_check_can_reach_the_keychain
+    skip "the sandbox is macOS only" unless RbConfig::CONFIG["host_os"].include?("darwin")
+    asks = ["/usr/bin/security", "find-generic-password", "-s", "giraffe-test-no-such-item"]
+    checks = Giraffe::Checks.new(config(sandbox_checks: true), command: @command)
+    refute_match(/not valid/, @command.capture(asks, cwd: @repo)["stderr"], "outside the sandbox the keychain answers")
+    assert_match(/not valid/, checks.run(@repo, [asks]).first["excerpt"])
+    assert_match(/not valid/, checks.run(@repo, [asks], network: true).first["excerpt"])
+  end
+
+  def test_a_run_started_before_screen_checks_existed_still_runs
+    old = Giraffe::Config.new(config.data.reject { |key, _| key == "screen_checks" }, resolved: true)
+    run = Giraffe::Run.start(old, ticket)
+    execute(run)
+    assert_equal "draft_pr", run.state["status"]
   end
 
   def test_candidate_missing_its_regression_spec_goes_red_instead_of_stopping_the_run

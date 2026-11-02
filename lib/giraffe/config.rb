@@ -9,7 +9,7 @@ require_relative "errors"
 module Giraffe
   class Config
     DEFAULTS = {
-      "store" => "mirrored", "base" => "origin/main", "pr_base" => "main", "spec_command" => [], "checks" => [], "lint" => [], "check_timeout" => 600,
+      "store" => "mirrored", "base" => "origin/main", "pr_base" => "main", "spec_command" => [], "checks" => [], "lint" => [], "screen_checks" => [], "check_timeout" => 600,
       "sandbox_checks" => true, "runner" => "claude", "claude_bin" => "claude", "model" => "sonnet", "models" => {},
       "max_turns" => 30, "call_budget_usd" => 3.0, "run_budget_usd" => 25.0, "call_timeout" => 900,
       "max_fix_rounds" => 3, "instructions" => [], "skills" => {}, "dry_run" => false
@@ -50,8 +50,10 @@ module Giraffe
       raise Error, "models must map role names to model names" unless data["models"].is_a?(Hash) && data["models"].all? { |key, value| key.is_a?(String) && value.is_a?(String) && !value.empty? }
       raise Error, "github_repo must be OWNER/NAME" unless data["github_repo"].to_s.match?(PrGraph::PrCiContract::REPOSITORY_NAME)
       raise Error, "base must be a Git ref" if data["base"].to_s.empty? || data["base"].start_with?("-") || data["base"].match?(/[\r\n]/)
-      %w[checks lint].each do |key|
-        raise Error, "#{key} must be an array of command argument arrays" unless data[key].is_a?(Array) && data[key].all? { |argv| argv.is_a?(Array) && argv.any? && argv.all? { |v| v.is_a?(String) && !v.include?("\0") } }
+      # A run started before screen_checks existed has none, and stays readable.
+      %w[checks lint screen_checks].each do |key|
+        commands = data.fetch(key, [])
+        raise Error, "#{key} must be an array of command argument arrays" unless commands.is_a?(Array) && commands.all? { |argv| argv.is_a?(Array) && argv.any? && argv.all? { |v| v.is_a?(String) && !v.include?("\0") } }
       end
       validate_spec_command!(data["spec_command"]) unless @resolved
       raise Error, "pr_base must be a ref name" unless data["pr_base"].is_a?(String) && !data["pr_base"].empty? && !data["pr_base"].start_with?("-")

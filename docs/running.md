@@ -29,6 +29,7 @@ base ref before starting. Paths below resolve relative to the configuration file
   "context": "+your-team/giraffe-runs",
   "checks": [["bundle", "exec", "rspec"]],
   "lint": [["bundle", "exec", "rubocop"]],
+  "screen_checks": [],
   "spec_command": ["bundle", "exec", "rspec", "{spec}:{line}"],
   "runner": "claude",
   "model": "sonnet",
@@ -83,6 +84,42 @@ named roles. Arbitrary user/project settings, hooks, commands, MCP servers, and 
 not loaded. The Claude process receives Read/Grep/Glob and, for BUILD only, scoped Edit/Write. The
 harness runs all checks. CLI permissions are defense in depth, not isolation from hostile source code.
 
+### Screen checks
+
+Nothing else in a run can see layout, so a repository with a screen declares what can:
+
+```json
+"screen_checks": [
+  ["/bin/sh", "-c", "npm_config_cache=\"$TMPDIR/npm\" npm i --no-audit --no-fund && npm run horde -- --shots {shots}"]
+]
+```
+
+VERIFY runs them after the ordinary checks pass, on every ticket, each in a new checkout of the candidate with
+`{shots}` replaced by a directory for its screenshots. They run in the same sandbox as any check, with one difference:
+the network is open, because a browser suite needs it. So this is the candidate's code with the network: it can reach
+anything on localhost and send what it can read to anywhere. That is why it reads nothing in the home directory but the
+tools on its PATH, the `lib` and `libexec` beside them and git's configuration, and never the credential stores listed
+in `lib/giraffe/checks.rb`. A suite that needs more of home fails, such as one using Playwright's own browsers rather
+than the system Chrome, or a version manager's shims rather than its tool's own directory on PATH. No check can reach
+the keychain, and Chrome depends on that here: with that rule removed, Chrome in the fixture's check cannot draw. Writes
+stay in the checkout and temporary directories, which is why the command above moves npm's cache. Chrome cannot start
+its own sandbox inside this one, so it needs `--no-sandbox`, which Playwright passes by default. An ordinary check can
+still read the rest of home and leave it in a temporary directory for a screen check to send, so this narrows what can
+leave by accident, and is no boundary against hostile code.
+
+A screen check that exits nonzero sends VERIFY red, and BUILD gets its output in the fix batch. Otherwise every `.png`
+left under `{shots}` is kept in the run's `screenshots/<attempt>/`, with its digest in the verification artifact, and
+the auditor must open each one and rule it `fits` or `broken` by name. A picture ruled `broken` sends VERIFY red. If
+BUILD then finds no edit to make, the question to a person names the pictures, and their answer reaches the next audit.
+
+PLAN's rule for a change people can see is that a step extends these commands to reach each state it adds, at its
+longest and tallest, on the narrowest screen the repository supports, to take a screenshot there and to fail if its
+text ends past the screen's edge. [The fixture's check](../tests/fixtures/screens/fit_check.rb) shows one way to measure that.
+A ticket that TRIAGE or PLAN marks `ui` goes red if the commands leave no screenshot.
+
+With no `screen_checks` declared, a `ui` ticket asks a person to look at each candidate before its audit, and their
+answer is the audit's evidence. Pictures stay on the execution host: only their digests reach Temper or a restored run.
+
 ## Commands
 
 ```sh
@@ -118,7 +155,7 @@ changed files, which it can read for itself.
 
 BUILD runs each plan assignment in a fresh context, commits its files, then repeats executable checks
 and independent review within the configured round limit. A red edge from VERIFY re-enters BUILD as one
-fix batch carrying the failed verification, not a replay of the plan. If that batch changes nothing, the run asks a person instead of paying to repeat the same red, and the answer reaches the next audit, so what a browser suite or anything else the harness cannot run printed on that candidate can count as evidence. VERIFY runs checks again, refuses any
+fix batch carrying the failed verification, not a replay of the plan. If that batch changes nothing, the run asks a person instead of paying to repeat the same red, and the answer reaches the next audit, so what anything the harness cannot run printed on that candidate can count as evidence. VERIFY runs checks and [screen checks](#screen-checks) again, refuses any
 candidate/worktree mutation, and audits acceptance criteria without giving the auditor the plan.
 Unmet or unverifiable criteria cannot publish. Changed specs require mutations of existing production
 source or view files, never data or config files such as YAML, or scripts with no extension; the harness runs each spec unmutated and then mutated in disposable candidate worktrees and

@@ -70,7 +70,8 @@ module Giraffe
       end
 
       def step_plan
-        ask("plan", {"triage" => artifact("triage_brief"), "investigation" => artifact("investigation_report"), "reproduction" => artifact("repro_report")}) do |output|
+        ask("plan", {"triage" => artifact("triage_brief"), "investigation" => artifact("investigation_report"), "reproduction" => artifact("repro_report"),
+                     "screen_checks" => @run.config["screen_checks"].to_a}) do |output|
           @run.coordinator.validate_plan!(output["implementation_plan"], output["test_plan"])
           put("implementation_plan", output.fetch("implementation_plan"))
           put("test_plan", output.fetch("test_plan"))

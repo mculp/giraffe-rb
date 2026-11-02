@@ -114,7 +114,7 @@ plugin can make it run a step it skipped.
 | REPRODUCE | Reruns the probe on the base, fails the step if the result differs from the report, and checks the worktree is unchanged | Writes and runs a throwaway probe in the run's state directory (repro) |
 | PLAN | Posts the plan to the Linear ticket; a failed post leaves it in the run record and the DONE report | The test plan and the grounded plan, with the surveyed `ui` and the outcome clauses (outcome, plan) |
 | BUILD | Runs autocorrecting lint and the specs, commits, and finishes only with `build_manifest` and `self_review` for HEAD | A fresh writer call per batch (build); review and simplify (review); judging their findings (judgment) |
-| VERIFY | Runs specs and lint, the regression spec on base and on the fix, and the mutation audit | The acceptance audit against the ticket, without the plan, and the spec audit (audit); judging their findings (judgment) |
+| VERIFY | Runs specs and lint, the screen checks with their screenshots kept, the regression spec on base and on the fix, and the mutation audit | The acceptance audit against the ticket, without the plan, with a look at every screenshot, and the spec audit (audit); judging their findings (judgment) |
 | PUBLISH | Pushes, opens the draft PR, adds the Review Bot label when the repo has one, and adds `review-app` when PLAN surveyed `ui=yes` | Writes the PR body to the repo's template, or to Description and Notes sections when it has none (pr_body) |
 | PR-RISK | After PUBLISH, and again after a push that changed the diff: posts the risk comment and sets the one `pr-risk:<level>` label | Runs `/pr-risk` read-only on the draft PR and returns the level, verdict, sub-scores, and Verify first (risk); DONE's report carries Verify first |
 | CI-WATCH | `pr_ci.rb` waits on CI and reconciles | Digests a red build (ci_digest) |
@@ -135,13 +135,15 @@ run on Opus.
 
 Giraffe runs in any repo, not only the main app repo. At the start of a run the harness probes what
 the repo has and writes the result to the run record. A step that needs something the repo lacks
-skips or falls back, and says so in the DONE report. It never fails the run and never waits.
+skips or falls back, and says so in the DONE report. It never fails the run and never waits, with one
+exception: a change people can see with nothing to look at it waits for a person, because no other gate can see layout.
 
 | The repo lacks | The harness |
 | --- | --- |
 | A `review-bot` label | Adds no label, and DONE does not wait for a Review Bot review |
 | `.github/PULL_REQUEST_TEMPLATE.md` | Has PUBLISH write Description (the change, with the ticket link) and Notes (proof and steps to exercise it) |
 | A linter, or the test command the app uses | Runs the repo's own test command, and records that no linter ran |
+| `screen_checks` | Asks a person to look at each candidate of a ticket marked `ui` before its audit |
 | A `review-app` label or deploy | Skips REVIEW-APP |
 | The main app repo as the run's repo | Searches prior art in the repo the run is in |
 
