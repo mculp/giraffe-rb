@@ -16,7 +16,8 @@ module Giraffe
   # Unknown keywords fail at load time; this is not a general draft-2020-12 implementation.
   #
   # Each keyword of the dialect is a rule, an object that knows its `keyword` and says in `errors(schema, value, path)` what is
-  # wrong with a value that the schema asks it about: a list of messages, empty when the value is as the keyword asks.
+  # wrong with a value that the schema asks it about: a list of messages, empty when the value is as the keyword asks. A rule that
+  # holds schemas of its own also checks them, in `check!(schema)`.
   module Schema
     # How many problems a refusal names. A refusal is stored with the run, so it stays short.
     SHOWN = 8
@@ -36,15 +37,15 @@ module Giraffe
     # Every rule by its keyword, which is how a schema is checked to use no other.
     RULES = [TYPE, ADDITIONAL_PROPERTIES, *BY_KIND.values.flatten].to_h { |rule| [rule.keyword, rule] }.freeze
     KEYWORDS = RULES.keys.freeze
+    # The rules that hold schemas of their own and check them in `check!`, in the order those are checked.
+    NESTING = RULES.values_at("properties", "items", "oneOf").freeze
     module_function
 
     def check!(schema)
       raise InvalidOutput, "schema must be an object" unless schema.is_a?(Hash)
       unknown = schema.keys - KEYWORDS
       raise InvalidOutput, "unsupported schema keyword: #{unknown.join(', ')}" unless unknown.empty?
-      schema.fetch("properties", {}).each_value { |child| check!(child) }
-      check!(schema["items"]) if schema["items"]
-      schema.fetch("oneOf", []).each { |child| check!(child) }
+      NESTING.each { |rule| rule.check!(schema) }
       schema
     end
 

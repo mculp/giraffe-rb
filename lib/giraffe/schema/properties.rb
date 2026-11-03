@@ -16,6 +16,10 @@ module Giraffe
           described[key] ? Schema.errors(described[key], inner, member) : @additional.errors(schema, inner, member)
         end
       end
+
+      def check!(schema)
+        schema.fetch("properties", {}).each_value { |child| Schema.check!(child) }
+      end
     end
   end
 end

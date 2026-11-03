@@ -15,6 +15,10 @@ module Giraffe
         ["#{path} must match exactly one of: #{outcomes.map { |problems| lacking(problems) }.join(' OR ')}"]
       end
 
+      def check!(schema)
+        schema.fetch("oneOf", []).each { |child| Schema.check!(child) }
+      end
+
       private
 
       def lacking(problems) = problems.empty? ? "matched" : problems.first(Schema::SHOWN).join(", ")
