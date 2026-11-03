@@ -63,7 +63,7 @@ module Fixture
   module_function
 
   def store(run_id)
-    backend = Giraffe::Backends.build({"context" => ENV.fetch("CONTEXT")}, run_id: run_id, ticket: "DEMO-1", backoff: [0, 0])
+    backend = Giraffe::Backends::Temper.new(context: ENV.fetch("CONTEXT"), run_id: run_id, ticket: "DEMO-1", backoff: [0, 0])
     PrGraph::Store.new(backend: backend, run_id: run_id)
   end
 

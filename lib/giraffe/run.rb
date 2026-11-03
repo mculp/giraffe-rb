@@ -41,7 +41,7 @@ module Giraffe
       raise Error, "invalid run ID" unless id.match?(PrGraph::EventLog::UUID)
       destination = File.expand_path(destination)
       raise Error, "restore destination must be empty" if File.exist?(destination) && Dir.children(destination).any?
-      remote = PrGraph::Store.new(backend: Backends.build({"context" => context}, run_id: id, ticket: ticket), run_id: id)
+      remote = PrGraph::Store.new(backend: Backends.reader({"context" => context}, run_id: id, ticket: ticket), run_id: id)
       state = remote.latest_checkpoint || raise(Error, "no fully synced checkpoint")
       raise Error, "checkpoint identity mismatch" unless state["run_id"] == id && state.dig("config", "context") == context
       FileUtils.mkdir_p(destination, mode: 0o700)
@@ -54,8 +54,7 @@ module Giraffe
 
     def self.store_for(path, state)
       run_id = state.fetch("run_id")
-      # The journal is the retry queue, so a mirror never waits on a retry. It pins the run's kinds to this release's contracts.
-      backend = Backends.build(state["config"], run_id: run_id, ticket: state.dig("ticket", "id"), backoff: [], versioned: true) if state.dig("config", "store") == "mirrored"
+      backend = Backends.mirror(state["config"], run_id: run_id, ticket: state.dig("ticket", "id")) if state.dig("config", "store") == "mirrored"
       LocalStore.new(path: path, run_id: run_id, backend: backend)
     end
     private_class_method :store_for

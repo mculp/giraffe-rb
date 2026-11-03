@@ -95,7 +95,7 @@ class HarnessTest < Minitest::Test
 
   # The run's copy in Temper, read the way a restore reads it.
   def remote_of(run)
-    backend = Giraffe::Backends.build({"context" => "+test/runs"}, run_id: run.id, ticket: ticket["id"])
+    backend = Giraffe::Backends.reader({"context" => "+test/runs"}, run_id: run.id, ticket: ticket["id"])
     PrGraph::Store.new(backend: backend, run_id: run.id)
   end
 
@@ -195,17 +195,32 @@ class HarnessTest < Minitest::Test
     assert_match(/screen_checks/, assert_raises(Giraffe::Error) { config(screen_checks: "npm run horde") }.message)
   end
 
-  def test_backends_build_temper_from_a_configuration_that_names_it_or_none
-    [{}, {"backend" => "temper"}].each do |named|
-      backend = Giraffe::Backends.build(named.merge("context" => "+test/runs"), run_id: SecureRandom.uuid, ticket: ticket["id"])
-      assert_instance_of Giraffe::Backends::Temper, backend
-      assert_equal "+test/runs", backend.to_s
-      refute backend.holds_run?
-      backend.open!
-      assert backend.holds_run?
+  def test_backends_build_temper_for_a_mirror_and_a_reader_from_a_configuration_that_names_it_or_none
+    [:mirror, :reader].each do |role|
+      [{}, {"backend" => "temper"}].each do |named|
+        backend = Giraffe::Backends.public_send(role, named.merge("context" => "+test/runs"), run_id: SecureRandom.uuid, ticket: ticket["id"])
+        assert_instance_of Giraffe::Backends::Temper, backend
+        assert_equal "+test/runs", backend.to_s
+        refute backend.holds_run?
+        backend.open!
+        assert backend.holds_run?
+      end
+      error = assert_raises(Giraffe::Error) { Giraffe::Backends.public_send(role, {"backend" => "sqlite"}, run_id: SecureRandom.uuid, ticket: ticket["id"]) }
+      assert_match(/unknown backend sqlite/, error.message)
     end
-    error = assert_raises(Giraffe::Error) { Giraffe::Backends.build({"backend" => "sqlite"}, run_id: SecureRandom.uuid, ticket: ticket["id"]) }
-    assert_match(/unknown backend sqlite/, error.message)
+  end
+
+  def test_a_mirror_never_waits_on_a_retry_but_a_reader_does
+    ENV["FAKE_TEMPER_FAIL"] = "resource list"
+    waited = {}
+    [:mirror, :reader].each do |role|
+      backend = Giraffe::Backends.public_send(role, {"context" => "+test/runs"}, run_id: SecureRandom.uuid, ticket: ticket["id"])
+      waited[role] = []
+      backend.define_singleton_method(:sleep) { |seconds| waited[role] << seconds }
+      assert_raises(PrGraph::Store::Error) { backend.holds_run? }
+    end
+    assert_empty waited[:mirror]
+    refute_empty waited[:reader]
   end
 
   def test_backend_defaults_to_temper_and_nothing_else_is_accepted
@@ -1027,7 +1042,7 @@ class HarnessTest < Minitest::Test
       result
     end
     id = SecureRandom.uuid
-    Giraffe::Backends.build({"context" => "+test/runs"}, run_id: id, ticket: ticket["id"], cli: cli, versioned: true).open!
+    Giraffe::Backends::Temper.new(context: "+test/runs", run_id: id, ticket: ticket["id"], cli: cli, versioned: true).open!
     rows = JSON.parse(File.read(ENV["FAKE_TEMPER_CONTEXT"]))["rows"]
     assert_equal 1, rows.count { |row| row.dig("open_meta", "giraffe_run_id") == id }
   end

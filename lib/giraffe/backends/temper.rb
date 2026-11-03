@@ -16,9 +16,16 @@ module Giraffe
       Error = PrGraph::Store::Error
       TAG = "giraffe-live-run"
 
-      # Reads the context from a configuration. `options` are the constructor's own.
-      def self.from(settings, **options)
-        new(context: settings["context"], **options)
+      # A running run's mirror. The journal is the retry queue, so it never waits on a retry, and it pins the
+      # run's kinds to this release's contracts.
+      def self.mirror(settings, run_id:, ticket:)
+        new(context: settings["context"], run_id: run_id, ticket: ticket, backoff: [], versioned: true)
+      end
+
+      # A restore's one read of a run. No running harness waits on it, so it keeps the usual retries, and it
+      # creates nothing, so the run's own record decides which kinds it reads.
+      def self.reader(settings, run_id:, ticket:)
+        new(context: settings["context"], run_id: run_id, ticket: ticket)
       end
 
       def initialize(context:, run_id:, ticket:, cli: PrGraph::TemperCli.new, backoff: [1, 5, 25], versioned: false)
