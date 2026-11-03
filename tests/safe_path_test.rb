@@ -90,7 +90,18 @@ class ProtectedPathsTest < Minitest::Test
   end
 
   def test_any_other_file_is_free_to_change
-    assert_empty protected_paths.among(%w[app.rb lib/environment.rb docs/guide.md .gitignore])
+    assert_empty protected_paths.among(%w[app.rb lib/environment.rb docs/guide.md .gitignore
+                                          App.rb Docs/Guide.md lib/Environment.rb .GITIGNORE])
+  end
+
+  def test_the_ticket_spellings_are_all_protected
+    names = %w[CLAUDE.md claude.md .Claude/settings.json .Cursor/rules/x.mdc .ENV]
+    assert_equal names, protected_paths.among(names)
+  end
+
+  def test_other_entries_are_protected_in_mixed_case
+    names = %w[.GIRAFFE/x .Husky/pre-commit config/Credentials/x .Env.local Agents.md server.PEM id.KEY .Git/config]
+    assert_equal names, protected_paths.among(names)
   end
 
   def test_it_answers_with_the_protected_ones_in_the_order_it_was_given
@@ -115,7 +126,7 @@ class ProtectedPathsTest < Minitest::Test
   end
 
   def test_with_hooks_at_the_root_only_bare_hook_names_are_protected
-    paths = %w[post-checkout POST-CHECKOUT pre-commit sub/post-checkout README.md app.rb]
-    assert_equal %w[post-checkout POST-CHECKOUT pre-commit], protected_paths(hooks_prefix: "./").among(paths)
+    paths = %w[post-checkout POST-CHECKOUT pre-push pre-commit sub/post-checkout README.md lib/app.rb]
+    assert_equal %w[post-checkout POST-CHECKOUT pre-push pre-commit], protected_paths(hooks_prefix: "./").among(paths)
   end
 end

@@ -1301,7 +1301,8 @@ class HarnessTest < Minitest::Test
   end
 
   def test_build_cannot_edit_the_hooks_a_checkout_will_run
-    {".githooks/post-checkout" => ".githooks/", "hooks/post-checkout" => "./hooks", ".husky/post-checkout" => nil}.each do |path, configured|
+    {".githooks/post-checkout" => ".githooks/", "hooks/post-checkout" => "./hooks", ".husky/post-checkout" => nil,
+     "post-checkout" => "./"}.each do |path, configured|
       FileUtils.mkdir_p(File.join(@repo, File.dirname(path)))
       File.write(File.join(@repo, path), "#!/bin/sh\nexit 0\n")
       commit_base("hooks in the tree")
