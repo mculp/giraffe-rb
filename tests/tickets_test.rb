@@ -1,15 +1,31 @@
 # frozen_string_literal: true
 
 require "minitest/autorun"
+require "minitest/mock"
 require "tmpdir"
 require "fileutils"
 require_relative "../lib/giraffe/tickets"
 
 # What Tickets.load answers whichever source the ticket comes from. The key is removed first, so even a mistaken
-# route to Linear stops before it could send anything; the Linear path has its own tests.
+# route to Linear stops before it could send anything; the one test that sets it replaces Net::HTTP.start. The
+# Linear path has its own tests.
 class TicketsTest < Minitest::Test
   TICKET = {"id" => "DEMO-1", "title" => "Show the greeting", "description" => "Say fixed."}.freeze
+  ISSUE = {"identifier" => "DEMO-1", "title" => "Show the greeting", "description" => "Say fixed.", "url" => "https://linear.app/x/DEMO-1"}.freeze
   LIMIT = 131_072
+  Response = Struct.new(:code, :body)
+
+  # What Net::HTTP.start hands its block: remembers the request and answers as Linear would.
+  class FakeConnection
+    attr_reader :sent
+
+    def initialize(body) = @response = Response.new("200", body)
+
+    def request(request)
+      @sent = request
+      @response
+    end
+  end
 
   def setup
     @tmp = Dir.mktmpdir("giraffe-tickets-test-")
@@ -45,6 +61,13 @@ class TicketsTest < Minitest::Test
 
   def test_an_identifier_alone_is_fetched_from_linear_which_needs_its_key
     assert_equal "LINEAR_API_KEY is required", refused(identifier: "DEMO-1")
+  end
+
+  def test_an_identifier_alone_is_fetched_from_linear_with_the_key_in_the_environment
+    ENV["LINEAR_API_KEY"] = "not-a-real-key"
+    connection = FakeConnection.new(JSON.generate("data" => {"issue" => ISSUE}))
+    ticket = Net::HTTP.stub(:start, ->(*, **, &use) { use.call(connection) }) { Giraffe::Tickets.load(identifier: "DEMO-1") }
+    assert_equal [TICKET.merge("url" => ISSUE["url"]), "not-a-real-key"], [ticket, connection.sent["Authorization"]]
   end
 
   def test_id_title_and_description_must_each_be_text
