@@ -65,11 +65,14 @@ class HarnessTest < Minitest::Test
   end
 
   def config(**overrides)
+    overrides = overrides.transform_keys(&:to_s)
+    # SQLite reads no context, and a config naming one is refused.
+    context = overrides["backend"] == "sqlite" ? {} : {"context" => "+test/runs"}
     Giraffe::Config.new(Giraffe::Config::DEFAULTS.merge(
-      "store" => "local", "repo" => @repo, "runs_dir" => File.join(@tmp, "runs"), "context" => "+test/runs",
+      "store" => "local", "repo" => @repo, "runs_dir" => File.join(@tmp, "runs"),
       "github_repo" => "example/app", "base" => "origin/main", "sandbox_checks" => false,
       "checks" => [[RbConfig.ruby, "-e", "abort 'wrong greeting' unless File.read('app.rb').include?('fixed')"]],
-      "spec_command" => [RbConfig.ruby, "{spec}"], "runner" => "scripted").merge(overrides.transform_keys(&:to_s)))
+      "spec_command" => [RbConfig.ruby, "{spec}"], "runner" => "scripted").merge(context).merge(overrides))
   end
 
   def ticket = {"id" => "DEMO-1", "title" => "Show the requested greeting", "description" => "Show fixed and preserve existing inputs."}
@@ -205,9 +208,190 @@ class HarnessTest < Minitest::Test
         backend.open!
         assert backend.holds_run?
       end
-      error = assert_raises(Giraffe::Error) { Giraffe::Backends.public_send(role, {"backend" => "sqlite"}, run_id: SecureRandom.uuid, ticket: ticket["id"]) }
-      assert_match(/unknown backend sqlite/, error.message)
+      error = assert_raises(Giraffe::Error) { Giraffe::Backends.public_send(role, {"backend" => "postgres"}, run_id: SecureRandom.uuid, ticket: ticket["id"]) }
+      assert_match(/unknown backend postgres/, error.message)
     end
+  end
+
+  def test_backends_build_sqlite_for_a_mirror_and_a_reader_naming_the_database
+    path = sqlite_path
+    id = SecureRandom.uuid
+    mirror = sqlite_mirror(path, id)
+    reader = Giraffe::Backends.reader(sqlite_settings(path), run_id: id, ticket: ticket["id"])
+    [mirror, reader].each do |backend|
+      assert_instance_of Giraffe::Backends::Sqlite, backend
+      assert_equal path, backend.to_s
+    end
+    refute mirror.holds_run?
+    refute File.exist?(path), "asking whether a run exists must not create the database"
+    mirror.open!
+    assert mirror.holds_run?
+    assert reader.holds_run?
+  end
+
+  def test_a_mirror_keeps_commits_in_commit_order_with_their_kind_precedence_and_correlation
+    path = sqlite_path
+    id = SecureRandom.uuid
+    backend = sqlite_mirror(path, id).open!
+    kinds = [PrGraph::Shapes::EVENT_LOG, PrGraph::Shapes::MANIFEST, PrGraph::Shapes::EVENT_LOG, PrGraph::Shapes::ARTIFACT_LOG]
+    committed = kinds.each_with_index.map do |kind, index|
+      content = {"transition_id" => "t#{index}", "events" => [{"seq" => 9 - index}]}
+      backend.commit(kind: kind, content: content, precedence: 9 - index, correlation: "c#{index}")
+      [kind, 9 - index, "c#{index}", content]
+    end
+    assert_equal committed.select { |row| row[0] == PrGraph::Shapes::EVENT_LOG }.map(&:last), backend.contents(PrGraph::Shapes::EVENT_LOG)
+    stored = sqlite_select(path, "SELECT kind, precedence, correlation, content FROM records WHERE run_id = ? ORDER BY id", id)
+    assert_equal committed.map { |kind, precedence, correlation, _| [kind, precedence, correlation] }, stored.map { |row| row.first(3) }
+    assert_equal committed.map(&:last), stored.map { |row| JSON.parse(row.last) }
+  end
+
+  def test_two_runs_in_one_database_each_see_only_their_own_records
+    path = sqlite_path
+    first, second = Array.new(2) { sqlite_mirror(path, SecureRandom.uuid).open! }
+    first.commit(kind: PrGraph::Shapes::MANIFEST, content: {"name" => "a", "text" => "one"}, precedence: 0, correlation: "x")
+    second.commit(kind: PrGraph::Shapes::MANIFEST, content: {"name" => "b", "text" => "two"}, precedence: 0, correlation: "y")
+    assert_equal [{"name" => "a", "text" => "one"}], first.contents(PrGraph::Shapes::MANIFEST)
+    assert_equal [{"name" => "b", "text" => "two"}], second.contents(PrGraph::Shapes::MANIFEST)
+  end
+
+  def test_opening_a_run_twice_leaves_one_row_for_it
+    path = sqlite_path
+    id = SecureRandom.uuid
+    2.times { sqlite_mirror(path, id).open! }
+    sqlite_mirror(path, id).open!.open!
+    assert_equal [[id]], sqlite_select(path, "SELECT run_id FROM runs")
+  end
+
+  def test_the_same_record_committed_twice_is_appended_twice_and_read_once
+    path = sqlite_path
+    id = SecureRandom.uuid
+    store = PrGraph::Store.new(backend: sqlite_mirror(path, id), run_id: id).open!
+    content = {"transition_id" => SecureRandom.uuid, "events" => [{"seq" => 1, "e" => "node"}]}
+    2.times { store.commit(kind: PrGraph::Store::EVENT_LOG, content: content, precedence: 1, correlation: id) }
+    assert_equal 2, sqlite_select(path, "SELECT count(*) FROM records WHERE run_id = ?", id).dig(0, 0)
+    assert_equal content["events"], store.send(:transitions, PrGraph::Store::EVENT_LOG)
+  end
+
+  def test_a_mirrored_run_on_sqlite_writes_as_it_goes_syncs_and_never_changes_a_row_it_wrote
+    path = sqlite_path
+    run = start(store: "mirrored", backend: "sqlite", database: path)
+    before = {records: sqlite_select(path, "SELECT * FROM records ORDER BY id"), runs: sqlite_select(path, "SELECT * FROM runs")}
+    refute_empty before[:records]
+    assert run.sync["synced"]
+    execute(run)
+    sqlite_mirror(path, run.id).open!
+    assert Giraffe::Run.load(run.path).sync["synced"]
+    after = sqlite_select(path, "SELECT * FROM records ORDER BY id")
+    assert_operator after.length, :>, before[:records].length
+    assert_equal before[:records], after.first(before[:records].length)
+    assert_equal before[:runs], sqlite_select(path, "SELECT * FROM runs")
+  end
+
+  def test_a_stored_kind_map_that_differs_from_this_release_is_refused_for_a_mirror_and_a_reader
+    path = sqlite_path
+    id = SecureRandom.uuid
+    sqlite_mirror(path, id).open!
+    sqlite_exec(path, "UPDATE runs SET kind_map = ? WHERE run_id = ?", JSON.generate("giraffe-run-event-log" => "giraffe-run-event-log-0000000000000000"), id)
+    [-> { sqlite_mirror(path, id).open! }, -> { Giraffe::Backends.reader(sqlite_settings(path), run_id: id, ticket: ticket["id"]).holds_run? }].each do |attempt|
+      error = assert_raises(PrGraph::Store::Error) { attempt.call }
+      assert_match(/run uses different contracts; resume it with its pinned Giraffe release/, error.message)
+    end
+  end
+
+  def test_a_reader_on_a_missing_database_names_the_path_and_creates_nothing
+    path = sqlite_path
+    reader = Giraffe::Backends.reader(sqlite_settings(path), run_id: SecureRandom.uuid, ticket: ticket["id"])
+    error = assert_raises(PrGraph::Store::Error) { reader.holds_run? }
+    assert_includes error.message, path
+    refute File.exist?(path)
+  end
+
+  def test_restore_from_a_missing_database_names_the_path_and_creates_neither_it_nor_the_destination
+    path = sqlite_path
+    destination = File.join(@tmp, "restored")
+    result = @command.capture([RbConfig.ruby, File.join(ROOT, "bin/giraffe"), "restore", SecureRandom.uuid, "--database", path,
+                               "--ticket", ticket["id"], "--destination", destination], cwd: @tmp)
+    refute_equal 0, result["status"]
+    assert_includes JSON.parse(result["stderr"]).fetch("error"), path
+    refute File.exist?(path)
+    refute File.exist?(destination)
+  end
+
+  def test_a_database_without_the_run_holds_no_run_for_it
+    path = sqlite_path
+    sqlite_mirror(path, SecureRandom.uuid).open!
+    id = SecureRandom.uuid
+    reader = Giraffe::Backends.reader(sqlite_settings(path), run_id: id, ticket: ticket["id"])
+    refute reader.holds_run?
+    error = assert_raises(PrGraph::Store::Error) { PrGraph::Store.new(backend: reader, run_id: id).latest_checkpoint }
+    assert_equal "#{path} holds no run #{id}", error.message
+  end
+
+  def test_two_processes_committing_to_one_database_both_succeed_without_a_lock_error
+    require "sqlite3"
+    path = sqlite_path
+    ids = Array.new(2) { SecureRandom.uuid }
+    pids = ids.each_with_index.map do |id, n|
+      fork do
+        backend = sqlite_mirror(path, id).open!
+        200.times { |i| backend.commit(kind: PrGraph::Shapes::MANIFEST, content: {"name" => "n#{i}", "text" => "p#{n}"}, precedence: i, correlation: id) }
+        exit!(0)
+      rescue Exception => e # rubocop:disable Lint/RescueException
+        File.write(File.join(@tmp, "child-#{n}.err"), e.message)
+        exit!(1)
+      end
+    end
+    pids.each { |pid| assert Process.wait2(pid).last.success?, Dir[File.join(@tmp, "child-*.err")].map { |file| File.read(file) }.join("; ") }
+    ids.each do |id|
+      names = sqlite_select(path, "SELECT content FROM records WHERE run_id = ? ORDER BY id", id).map { |row| JSON.parse(row.first)["name"] }
+      assert_equal Array.new(200) { |i| "n#{i}" }, names
+    end
+  end
+
+  def test_choosing_sqlite_without_the_gem_fails_naming_the_install_and_prints_no_backtrace
+    shim = File.join(@tmp, "shim")
+    FileUtils.mkdir_p(shim)
+    File.write(File.join(shim, "sqlite3.rb"), "raise LoadError, 'cannot load such file -- sqlite3'\n")
+    ticket_file = File.join(@tmp, "ticket.json")
+    config_file = File.join(@tmp, "giraffe.json")
+    File.write(ticket_file, JSON.generate(ticket))
+    File.write(config_file, JSON.generate(config(store: "mirrored", backend: "sqlite", database: sqlite_path).data))
+    result = @command.capture([RbConfig.ruby, "-I", shim, File.join(ROOT, "bin/giraffe"), "start", "--ticket-file", ticket_file, "--config", config_file], cwd: @tmp)
+    refute_equal 0, result["status"]
+    assert_includes JSON.parse(result["stderr"]).fetch("error"), "gem install sqlite3"
+    refute_match(/\.rb:\d+/, result["stderr"])
+  end
+
+  def test_a_temper_run_never_loads_the_sqlite_gem
+    config_file = File.join(@tmp, "giraffe.json")
+    ticket_file = File.join(@tmp, "ticket.json")
+    File.write(config_file, JSON.generate(config(store: "mirrored").data))
+    File.write(ticket_file, JSON.generate(ticket))
+    code = 'require "json"; require ARGV[0]; run = Giraffe::Run.start(Giraffe::Config.load(ARGV[1]), JSON.parse(File.read(ARGV[2]))); ' \
+           'run.sync; puts $LOADED_FEATURES.grep(/sqlite3/).inspect'
+    output = @command.run!([RbConfig.ruby, "-e", code, File.join(ROOT, "lib/giraffe/harness"), config_file, ticket_file], cwd: @tmp)
+    assert_equal "[]", output.lines.last.strip
+  end
+
+  def sqlite_path = File.join(@tmp, "runs.sqlite3")
+  def sqlite_settings(path) = {"backend" => "sqlite", "database" => path}
+  def sqlite_mirror(path, id) = Giraffe::Backends.mirror(sqlite_settings(path), run_id: id, ticket: ticket["id"])
+
+  # Rows read straight from the file, the way a person with the sqlite3 gem would.
+  def sqlite_select(path, sql, *binds)
+    require "sqlite3"
+    database = SQLite3::Database.new(path, readonly: true)
+    database.execute(sql, binds)
+  ensure
+    database&.close
+  end
+
+  def sqlite_exec(path, sql, *binds)
+    require "sqlite3"
+    database = SQLite3::Database.new(path)
+    database.execute(sql, binds)
+  ensure
+    database&.close
   end
 
   def test_a_mirror_never_waits_on_a_retry_but_a_reader_does
@@ -225,8 +409,35 @@ class HarnessTest < Minitest::Test
 
   def test_backend_defaults_to_temper_and_nothing_else_is_accepted
     assert_equal "temper", config["backend"]
-    assert_match(/backend must be temper/, assert_raises(Giraffe::Error) { config(backend: "sqlite") }.message)
-    assert_match(/backend must be temper/, assert_raises(Giraffe::Error) { config(backend: nil) }.message)
+    assert_equal "sqlite", config(backend: "sqlite")["backend"]
+    assert_match(/postgres/, assert_raises(Giraffe::Error) { config(backend: "postgres") }.message)
+    assert_match(/backend must be temper or sqlite/, assert_raises(Giraffe::Error) { config(backend: nil) }.message)
+  end
+
+  def test_sqlite_database_defaults_into_runs_dir_and_a_relative_one_resolves_against_the_config_file
+    assert_equal File.join(@tmp, "runs", "giraffe.sqlite3"), config(backend: "sqlite")["database"]
+    folder = File.join(@tmp, "conf")
+    FileUtils.mkdir_p(folder)
+    file = File.join(folder, "giraffe.json")
+    raw = config(backend: "sqlite", store: "mirrored").data.except("repo", "runs_dir", "profiles", "database")
+    File.write(file, JSON.generate(raw.merge("repo" => @repo, "database" => "data/mine.sqlite3")))
+    assert_equal File.join(folder, "data", "mine.sqlite3"), Giraffe::Config.load(file)["database"]
+  end
+
+  def test_each_backend_refuses_the_key_it_does_not_read_and_sqlite_mirrored_needs_no_context
+    assert_match(/database.*temper/, assert_raises(Giraffe::Error) { config(database: "x.sqlite3") }.message)
+    assert_match(/database.*temper/, assert_raises(Giraffe::Error) { config(backend: "temper", database: "x.sqlite3") }.message)
+    assert_match(/context.*sqlite/, assert_raises(Giraffe::Error) { config(backend: "sqlite", context: "+test/runs") }.message)
+    assert_equal "mirrored", config(backend: "sqlite", store: "mirrored")["store"]
+  end
+
+  def test_configs_without_a_backend_or_naming_temper_are_accepted_as_before
+    assert_match(/context is required/, assert_raises(Giraffe::Error) { config(store: "mirrored", context: nil) }.message)
+    [{}, {"backend" => "temper"}].each do |named|
+      data = config.data.except("backend").merge(named)
+      assert_equal "local", Giraffe::Config.new(data)["store"], "a context with the local store is accepted"
+      assert_equal "mirrored", Giraffe::Config.new(data.merge("store" => "mirrored"))["store"]
+    end
   end
 
   def test_run_started_without_a_backend_still_loads_and_mirrors_to_temper
