@@ -20,12 +20,20 @@ module Giraffe
 
       # A running run's mirror. It creates the file and the run's row when they are missing.
       def self.mirror(settings, run_id:, ticket:)
+        load_driver # live writes swallow errors into the sync status, so a missing gem must fail here, where the run is built
         new(path: settings.fetch("database"), run_id: run_id, ticket: ticket, creating: true)
       end
 
       # A restore's one read of a run. It creates nothing: a mistyped path must fail, not become an empty database.
       def self.reader(settings, run_id:, ticket:)
         new(path: settings.fetch("database"), run_id: run_id, ticket: ticket, creating: false)
+      end
+
+      # The gem is optional, so only a run that chose this backend needs it.
+      def self.load_driver
+        require "sqlite3"
+      rescue LoadError
+        raise Error, "the sqlite backend needs the sqlite3 gem: gem install sqlite3"
       end
 
       def initialize(path:, run_id:, ticket:, creating:)
@@ -97,15 +105,8 @@ module Giraffe
         SQLite3::Database.new(path, readonly: !@creating).tap { |database| database.busy_timeout = BUSY_TIMEOUT_MS }
       end
 
-      # The gem is optional, so only a run that chose this backend needs it.
-      def load_driver
-        require "sqlite3"
-      rescue LoadError
-        raise Error, "the sqlite backend needs the sqlite3 gem: gem install sqlite3"
-      end
-
       def guard
-        load_driver
+        self.class.load_driver
         begin
           yield
         rescue SQLite3::Exception => e
