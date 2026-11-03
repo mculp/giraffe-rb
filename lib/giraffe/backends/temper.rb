@@ -1,10 +1,10 @@
 # frozen_string_literal: true
 
-require "digest"
 require "json"
 require "tempfile"
 require_relative "../../../scripts/temper_cli"
 require_relative "../shapes"
+require_relative "kind_map"
 require_relative "../store"
 
 module Giraffe
@@ -86,7 +86,7 @@ module Giraffe
       end
 
       def versioned_kinds
-        shapes.to_h { |kind, schema| [kind, "#{kind}-#{Digest::SHA256.hexdigest(JSON.generate(schema))[0, 16]}"] }
+        KindMap.current(shapes)
       end
 
       # Finding the resource is what loads the run's kind map, so it comes first.
@@ -110,7 +110,7 @@ module Giraffe
         return nil if matches.empty?
         @kind_map = matches.first.dig("open_meta", "giraffe_kind_map")
         if @kind_map && @kind_map != versioned_kinds
-          raise Error, "run uses different contracts; resume it with its pinned Giraffe release"
+          raise Error, KindMap::MISMATCH
         end
         matches.first.fetch("id")
       end
