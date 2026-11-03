@@ -1,12 +1,41 @@
 # frozen_string_literal: true
 
 require_relative "errors"
+require_relative "schema/type"
+require_relative "schema/const"
+require_relative "schema/enum"
+require_relative "schema/one_of"
+require_relative "schema/required"
+require_relative "schema/properties"
+require_relative "schema/additional_properties"
+require_relative "schema/items"
+require_relative "schema/bound"
 
 module Giraffe
   # The deliberately small JSON Schema dialect used by the checked-in runner schemas.
   # Unknown keywords fail at load time; this is not a general draft-2020-12 implementation.
+  #
+  # Each keyword of the dialect is a rule, an object that knows its `keyword` and says in `errors(schema, value, path)` what is
+  # wrong with a value that the schema asks it about: a list of messages, empty when the value is as the keyword asks.
   module Schema
-    KEYWORDS = %w[type properties required additionalProperties items minItems maxItems minLength enum const minimum maximum oneOf].freeze
+    # How many problems a refusal names. A refusal is stored with the run, so it stays short.
+    SHOWN = 8
+    # A value of the wrong type is told so alone, so this rule is asked before any other.
+    TYPE = Type.new
+    # Asked by Properties about the members no property describes, and never about a value as a whole.
+    ADDITIONAL_PROPERTIES = AdditionalProperties.new
+    # What a value is held to, by what it is, in the order the errors are told: everything to const, enum and oneOf, and then each
+    # to what its own kind asks. The order is not the schema's: the same schema tells the same errors however it lists its keywords.
+    BY_KIND = {
+      Object => [Const.new, Enum.new, OneOf.new],
+      Hash => [Required.new, Properties.new(ADDITIONAL_PROPERTIES)],
+      Array => [Bound.new("minItems", :length, :<, "has too few items"), Bound.new("maxItems", :length, :>, "has too many items"), Items.new],
+      String => [Bound.new("minLength", :length, :<, "is too short")],
+      Numeric => [Bound.new("minimum", :itself, :<, "is below minimum"), Bound.new("maximum", :itself, :>, "is above maximum")]
+    }.freeze
+    # Every rule by its keyword, which is how a schema is checked to use no other.
+    RULES = [TYPE, ADDITIONAL_PROPERTIES, *BY_KIND.values.flatten].to_h { |rule| [rule.keyword, rule] }.freeze
+    KEYWORDS = RULES.keys.freeze
     module_function
 
     def check!(schema)
@@ -21,57 +50,17 @@ module Giraffe
 
     def validate!(schema, value, path = "$")
       errors = errors(schema, value, path)
-      raise InvalidOutput, errors.first(8).join("; ") unless errors.empty?
+      raise InvalidOutput, errors.first(SHOWN).join("; ") unless errors.empty?
       value
     end
 
     def errors(schema, value, path = "$")
-      types = Array(schema["type"])
-      return ["#{path} must be #{types.join(' or ')}"] if types.any? && types.none? { |type| type?(type, value) }
-      found = []
-      found << "#{path} must equal #{schema['const'].inspect}" if schema.key?("const") && value != schema["const"]
-      found << "#{path} is outside its enum" if schema["enum"] && !schema["enum"].include?(value)
-      found.concat(one_of_errors(schema["oneOf"], value, path)) if schema["oneOf"]
-      if value.is_a?(Hash)
-        schema.fetch("required", []).each { |key| found << "#{path}.#{key} is required" unless value.key?(key) }
-        properties = schema.fetch("properties", {})
-        value.each do |key, inner|
-          if properties[key]
-            found.concat(errors(properties[key], inner, "#{path}.#{key}"))
-          elsif schema["additionalProperties"] == false
-            found << "#{path}.#{key} is not allowed"
-          end
-        end
-      elsif value.is_a?(Array)
-        found << "#{path} has too few items" if schema["minItems"] && value.length < schema["minItems"]
-        found << "#{path} has too many items" if schema["maxItems"] && value.length > schema["maxItems"]
-        value.each_with_index { |inner, index| found.concat(errors(schema["items"], inner, "#{path}[#{index}]")) } if schema["items"]
-      elsif value.is_a?(String)
-        found << "#{path} is too short" if schema["minLength"] && value.length < schema["minLength"]
-      elsif value.is_a?(Numeric)
-        found << "#{path} is below minimum" if schema["minimum"] && value < schema["minimum"]
-        found << "#{path} is above maximum" if schema["maximum"] && value > schema["maximum"]
-      end
-      found
+      mismatch = TYPE.errors(schema, value, path)
+      return mismatch unless mismatch.empty?
+      rules_for(value).flat_map { |rule| rule.errors(schema, value, path) }
     end
 
-    # What each shape still lacks. A model asked again has to see what would make its output fit, and fewest
-    # errors would not say which shape it meant: an incomplete output is closest to the one asking questions.
-    def one_of_errors(branches, value, path)
-      outcomes = branches.map { |branch| errors(branch, value, path) }
-      return [] if outcomes.one?(&:empty?)
-      ["#{path} must match exactly one of: #{outcomes.map { |problems| problems.empty? ? 'matched' : problems.first(8).join(', ') }.join(' OR ')}"]
-    end
-
-    def type?(type, value)
-      case type
-      when "object" then value.is_a?(Hash)
-      when "array" then value.is_a?(Array)
-      when "string" then value.is_a?(String)
-      when "integer" then value.is_a?(Integer)
-      when "boolean" then value == true || value == false
-      else raise InvalidOutput, "unsupported schema type: #{type}"
-      end
-    end
+    def rules_for(value) = BY_KIND.select { |kind, _| value.is_a?(kind) }.values.flatten
+    private_class_method :rules_for
   end
 end
