@@ -4,6 +4,7 @@ require "open3"
 require_relative "../../scripts/process_group"
 require_relative "errors"
 require_relative "command/invocation"
+require_relative "command/pipes"
 
 module Giraffe
   # Argument arrays only; shell commands for project checks are explicit, sandboxed inputs.
@@ -31,46 +32,21 @@ module Giraffe
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       output = error = status = nil
       Open3.popen3(*invocation.popen3_args) do |stdin, stdout, stderr, waiter|
-        readers = [stdout, stderr].map do |stream|
-          Thread.new do
-            Thread.current.report_on_exception = false
-            data = +""
-            while (chunk = stream.read(16_384))
-              data << chunk
-              if data.bytesize > invocation.limit
-                raise CommandLimit, "#{invocation.label} output exceeds #{invocation.limit} bytes"
-              end
-            end
-            data
-          end
-        end
-        writer = Thread.new do
-          Thread.current.report_on_exception = false
-          begin
-            stdin.write(invocation.input) if invocation.input
-          rescue Errno::EPIPE
-            nil
-          ensure
-            stdin.close unless stdin.closed?
-          end
-        end
+        pipes = Pipes.new(stdin, stdout, stderr, invocation)
         begin
           loop do
             raise Cancelled, "run cancelled" if @cancelled.call
             raise CommandLimit, "#{invocation.label} timed out after #{invocation.timeout}s" if Process.clock_gettime(Process::CLOCK_MONOTONIC) - started > invocation.timeout
-            readers.each { |thread| thread.value unless thread.alive? }
-            pending = [waiter, *readers, writer].find(&:alive?)
+            pipes.check!
+            pending = [waiter, *pipes.threads].find(&:alive?)
             break unless pending
             pending.join(0.025)
           end
-          writer.value
-          output, error = readers.map(&:value)
+          output, error = pipes.output
           status = waiter.value.exitstatus || 128 + waiter.value.termsig.to_i
         ensure
           PrGraph::ProcessGroup.terminate(waiter.pid)
-          stdin.close unless stdin.closed?
-          writer.join(1)
-          readers.each { |thread| thread.join(1) }
+          pipes.close
         end
       end
       {"status" => status, "stdout" => output.force_encoding("UTF-8").scrub, "stderr" => error.force_encoding("UTF-8").scrub}
