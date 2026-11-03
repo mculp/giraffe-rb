@@ -16,30 +16,30 @@ module Giraffe
         @checked = false
       end
 
-      def call(step:, prompt:, schema:, cwd:, writable: false, budget_usd:, **)
-        check_version!(cwd) unless @checked
+      def call(task)
+        check_version!(task.cwd) unless @checked
         # No shell, remote connector, subagent or publishing tools in any model call.
         tools = %w[Read Grep Glob]
-        tools += %w[Edit Write] if writable
+        tools += %w[Edit Write] if task.writable
         allowed = %w[Read Grep Glob]
-        allowed << "Edit(/**)" if writable
-        argv = [@config["claude_bin"], "-p", "--output-format", "json", "--json-schema", JSON.generate(enveloped(schema)),
+        allowed << "Edit(/**)" if task.writable
+        argv = [@config["claude_bin"], "-p", "--output-format", "json", "--json-schema", JSON.generate(enveloped(task.schema)),
                 "--setting-sources", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
                 "--permission-mode", "dontAsk", "--tools", tools.join(","), "--allowedTools", *allowed,
                 "--disallowedTools", "Bash", "Agent", "Task", "WebFetch", "WebSearch", "mcp__*",
                 "Edit(/**/.git/**)", "Edit(/.git)", "Edit(/**/.claude/**)", "Edit(/**/.cursor/**)",
                 "Edit(/**/.env*)", "Edit(/**/AGENTS.md)", "Edit(/**/CLAUDE.md)",
                 "--disable-slash-commands", "--no-session-persistence", "--max-turns", @config["max_turns"].to_s,
-                "--max-budget-usd", budget_usd.to_s, "--model", (@config["models"] || {}).fetch(step, @config["model"])]
+                "--max-budget-usd", task.budget_usd.to_s, "--model", (@config["models"] || {}).fetch(task.step, @config["model"])]
         # Input travels over stdin, never in process arguments. Only model authentication is inherited.
         env = ENV.slice(*Command::BASE_ENV, "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")
         env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
-        result = @command.capture(argv, cwd: cwd, env: env, clean_env: true, input: prompt,
+        result = @command.capture(argv, cwd: task.cwd, env: env, clean_env: true, input: task.prompt,
                                   timeout: @config["call_timeout"])
         doc = JSON.parse(result["stdout"])
         usage = {"cost_usd" => doc.fetch("total_cost_usd", 0.0), "turns" => doc.fetch("num_turns", 0)}
         unless result["status"].zero? && doc["type"] == "result" && doc["subtype"] == "success" && !doc["is_error"] && doc["structured_output"].is_a?(Hash) && doc["structured_output"].key?(ENVELOPE)
-          error = Error.new("Claude #{step} did not return a successful structured result: #{Command.tail((doc['result'] || doc['subtype'] || result['status']).to_s)}")
+          error = Error.new("Claude #{task.step} did not return a successful structured result: #{Command.tail((doc['result'] || doc['subtype'] || result['status']).to_s)}")
           error.usage = usage
           raise error
         end

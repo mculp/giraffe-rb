@@ -4,6 +4,7 @@ require "minitest/autorun"
 require "tmpdir"
 require "fileutils"
 require_relative "../lib/giraffe/runners/scripted"
+require_relative "../lib/giraffe/runners/task"
 
 class ScriptedRunnerTest < Minitest::Test
   # The runner works in a directory of its own inside another, so that a write which escapes lands somewhere the test cleans up.
@@ -16,7 +17,7 @@ class ScriptedRunnerTest < Minitest::Test
   def teardown = FileUtils.remove_entry(@parent)
 
   # Hands a runner a request the way Model does, filling in what a test does not care about.
-  def ask(runner, **request) = runner.call(**{step: "build", prompt: "p", schema: {}, cwd: @tmp, writable: false, budget_usd: 1.0}.merge(request))
+  def ask(runner, **request) = runner.call(Giraffe::Runners::Task.new(**{step: "build", prompt: "p", schema: {}, cwd: @tmp, writable: false, budget_usd: 1.0}.merge(request)))
   def script(*entries) = Giraffe::Runners::Scripted.new({"build" => entries})
 
   def test_each_call_is_kept_as_a_hash_of_what_was_asked

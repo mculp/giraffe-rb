@@ -15,8 +15,9 @@ module Giraffe
         @positions, @on_advance = positions.dup, on_advance
       end
 
-      def call(**request)
-        @calls << request
+      # A call is kept, and shown to an entry that answers for it, as the hash that tests read its fields from.
+      def call(task)
+        @calls << (request = task.to_h)
         role = request.fetch(:step)
         index = @positions.fetch(role, 0)
         entry = @script.fetch(role) { raise Error, "no scripted step #{role}" }[index]

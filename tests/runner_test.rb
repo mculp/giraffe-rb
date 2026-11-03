@@ -2,6 +2,7 @@
 
 require "minitest/autorun"
 require_relative "../lib/giraffe/runners/claude"
+require_relative "../lib/giraffe/runners/task"
 
 class RunnerTest < Minitest::Test
   class FakeCommand
@@ -46,7 +47,7 @@ class RunnerTest < Minitest::Test
   def schema = {"type" => "object", "required" => ["answer"], "properties" => {"answer" => {"type" => "string"}}, "additionalProperties" => false}
   def config = {"claude_bin" => "claude", "max_turns" => 10, "call_timeout" => 60, "model" => "sonnet"}
   # Hands a runner a request the way Model does.
-  def ask(runner, **request) = runner.call(**request)
+  def ask(runner, **request) = runner.call(Giraffe::Runners::Task.new(**request))
   def call(document, writable: false, status: 0, settings: config, step: "review", budget: 1.5)
     @command = FakeCommand.new(document, status: status)
     ask(Giraffe::Runners::Claude.new(settings, command: @command), step: step, prompt: "private prompt", schema: schema, cwd: Dir.pwd, writable: writable, budget_usd: budget)
