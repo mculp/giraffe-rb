@@ -46,7 +46,14 @@ class HarnessTest < Minitest::Test
     nil
   end
 
+  NEEDS_A_SANDBOX_OF_THEIR_OWN = %w[
+    test_the_line_that_ran_off_a_phone_at_695756d_cannot_reach_a_draft
+    test_a_screen_check_gets_the_network_and_little_of_the_home_directory
+    test_no_check_can_reach_the_keychain
+  ].freeze
+
   def setup
+    skip_inside_a_sandbox if NEEDS_A_SANDBOX_OF_THEIR_OWN.include?(name)
     @tmp = Dir.mktmpdir("giraffe-harness-test-")
     @repo = File.join(@tmp, "app")
     @git = Giraffe::Git.new
@@ -70,6 +77,8 @@ class HarnessTest < Minitest::Test
   end
 
   def teardown
+    return unless @tmp # setup skipped before it made anything
+
     ENV.replace(@old_env)
     FileUtils.remove_entry(@tmp)
   end
@@ -729,7 +738,6 @@ class HarnessTest < Minitest::Test
   # passed it. A person found it in a screenshot, and its fix, 81d2a72, measures what this fixture does.
   def test_the_line_that_ran_off_a_phone_at_695756d_cannot_reach_a_draft
     skip "no Chrome here to draw with" unless ScreenFit.chrome
-    skip_inside_a_sandbox
     fixture = ->(name) { File.read(File.join(ROOT, "tests/fixtures/screens", name), encoding: "UTF-8") }
     data = script
     data["build"][0]["writes"].merge!("hud.html" => fixture["hud_695756d.html"], "fit_check.rb" => fixture["fit_check.rb"])
@@ -863,7 +871,6 @@ class HarnessTest < Minitest::Test
   # With the network open, what a screen check can read can leave.
   def test_a_screen_check_gets_the_network_and_little_of_the_home_directory
     skip "the sandbox is macOS only" unless RbConfig::CONFIG["host_os"].include?("darwin")
-    skip_inside_a_sandbox
     home = File.join(File.realpath(@tmp), "home")
     FileUtils.mkdir_p(%w[.ssh tool/bin tool/lib].map { |path| File.join(home, path) })
     {".ssh/id" => "private", "notes.txt" => "private", "tool/lib/runtime" => "a tool's own file", "tool/credentials.toml" => "private", ".gitconfig" => "[user]\n"}.each { |path, text| File.write(File.join(home, path), text) }
@@ -899,7 +906,6 @@ class HarnessTest < Minitest::Test
   # no such item. A search the services refuse says it was not valid, and one they answer only that nothing was found.
   def test_no_check_can_reach_the_keychain
     skip "the sandbox is macOS only" unless RbConfig::CONFIG["host_os"].include?("darwin")
-    skip_inside_a_sandbox
     asks = ["/usr/bin/security", "find-generic-password", "-s", "giraffe-test-no-such-item"]
     checks = Giraffe::Checks.new(config(sandbox_checks: true), command: @command)
     refute_match(/not valid/, @command.capture(asks, cwd: @repo)["stderr"], "outside the sandbox the keychain answers")
