@@ -2,12 +2,13 @@
 
 require_relative "errors"
 require_relative "backends/temper"
+require_relative "backends/sqlite"
 
 module Giraffe
   # Where a run's records live. PrGraph::Store lists what it asks of a backend; each class here answers that,
   # and builds itself for the two callers that want one: `mirror` for a running run, `reader` for a restore.
   module Backends
-    BY_NAME = {"temper" => Temper}.freeze
+    BY_NAME = {"temper" => Temper, "sqlite" => Sqlite}.freeze
     DEFAULT = "temper"
 
     def self.names
