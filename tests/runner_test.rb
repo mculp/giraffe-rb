@@ -101,6 +101,16 @@ class RunnerTest < Minitest::Test
     assert_equal WRITER_ARGV, argv_after(writable: true)
   end
 
+  def test_the_command_line_depends_on_the_config_and_the_task_alone
+    reader = Giraffe::Runners::Task.new(step: "review", prompt: "p", schema: schema, cwd: "/work", writable: false, budget_usd: 1.5)
+    assert_equal READER_ARGV, Giraffe::Runners::ClaudeArgv.new(config, reader).to_a
+    assert_equal WRITER_ARGV, Giraffe::Runners::ClaudeArgv.new(config, reader.with(writable: true)).to_a
+  end
+
+  def test_a_task_that_does_not_say_it_may_write_may_not
+    assert_equal false, Giraffe::Runners::Task.new(step: "review", prompt: "p", schema: schema, cwd: "/work", budget_usd: 1).writable
+  end
+
   def test_a_call_that_does_not_say_it_may_write_only_reads
     command = FakeCommand.new(success)
     ask(Giraffe::Runners::Claude.new(config, command: command), step: "review", prompt: "p", schema: schema, cwd: Dir.pwd, budget_usd: 1)
