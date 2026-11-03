@@ -1,20 +1,18 @@
 # frozen_string_literal: true
 
 require "digest"
-require "fileutils"
 require "pathname"
-require "tmpdir"
 require_relative "command"
+require_relative "git/checkouts"
 
 module Giraffe
   class Git
     # For output only the harness reads, which grows with the repository rather than with anything a person wrote.
     BOOKKEEPING_LIMIT = 256_000_000
-    # A post-checkout hook may well install dependencies.
-    CHECKOUT_TIMEOUT = 600
 
     def initialize(command: Command.new)
       @command = command
+      @checkouts = Checkouts.new(git: self, command: command)
     end
 
     def call(repo, *args) = run_git(repo, *args, timeout: 120).strip
@@ -45,16 +43,9 @@ module Giraffe
       yield.tap { unchanged!(repo, before) }
     end
 
-    def worktree(repo:, path:, branch:, base:)
-      call(repo, "check-ref-format", "--branch", branch)
-      base_sha = resolve_commit(repo, base)
-      discard_unfinished_worktree(repo, path, branch) if File.exist?(path)
-      # Never adopt an unrelated pre-existing branch implicitly.
-      raise Error, "branch already exists outside this run: #{branch}" if exit_status(repo, "show-ref", "--verify", "--quiet", "refs/heads/#{branch}").zero?
-      FileUtils.mkdir_p(File.dirname(path))
-      add_checkout(repo, "-b", branch, path, base_sha)
-      {"path" => File.realpath(path), "branch" => branch, "base_sha" => base_sha, "common_git_dir" => common(repo)}
-    end
+    # Checkouts run the project's own hooks, so one class holds how they are made and how they are removed.
+    def worktree(**options) = @checkouts.worktree(**options)
+    def at_commit(repo, sha, &block) = @checkouts.at_commit(repo, sha, &block)
 
     def common(repo)
       File.realpath(File.expand_path(call(repo, "rev-parse", "--git-common-dir"), repo))
@@ -113,18 +104,6 @@ module Giraffe
       changed_paths(repo).to_h { |path| [path, file_state(File.join(repo, path))] }
     end
 
-    def at_commit(repo, sha)
-      Dir.mktmpdir("giraffe-proof-") do |directory|
-        target = File.join(directory, "tree")
-        begin
-          add_checkout(repo, "--detach", target, sha)
-          yield target
-        ensure
-          remove_checkout(repo, target) if File.exist?(target)
-        end
-      end
-    end
-
     private
 
     def file_state(path)
@@ -137,29 +116,6 @@ module Giraffe
       [stat.ftype, stat.mode, content]
     rescue Errno::ENOENT, Errno::ENOTDIR
       nil
-    end
-
-    # A worktree found here never finished being made: its hook failed, or died with the machine, so it lacks what
-    # the hook provides. Nothing leads back to WORKTREE once it finishes, so nothing has worked in this one.
-    def discard_unfinished_worktree(repo, path, branch)
-      raise Error, "unexpected existing worktree path: #{path}" unless File.directory?(path) && File.realpath(call(path, "rev-parse", "--show-toplevel")) == File.realpath(path)
-      raise Error, "worktree belongs to another branch" unless call(path, "branch", "--show-current") == branch
-      raise Error, "worktree belongs to another repository" unless common(path) == common(repo)
-      remove_checkout(repo, path)
-      call(repo, "branch", "-D", branch)
-    end
-
-    # Checking out runs the project's post-checkout hook on the commit's files, outside the checks' sandbox. It gets
-    # time to install what it must, and no more of the harness's environment than a check gets.
-    def add_checkout(repo, *args)
-      run_git(repo, "worktree", "add", *args, timeout: CHECKOUT_TIMEOUT, env: ENV.slice(*Command::PROJECT_ENV), clean_env: true)
-    end
-
-    # Writable first: a spec or hook can leave a directory read-only, which nothing could then empty. Twice forced,
-    # because git leaves a worktree it died making locked.
-    def remove_checkout(repo, path)
-      FileUtils.chmod_R("u+w", path, force: true)
-      call(repo, "worktree", "remove", "--force", "--force", path)
     end
 
     # A hunk that ends on its changed line is taken to end the file unless told otherwise, and a model writes those.
