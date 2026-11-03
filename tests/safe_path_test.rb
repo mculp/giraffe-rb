@@ -13,7 +13,7 @@ class SafePathTest < Minitest::Test
            "to_neighbour" => "../tree-secrets", "dangling" => "../elsewhere/new.rb"}.freeze
   LEADING_OUT = {"an absolute path" => "/etc/passwd", "a way up" => "../outside.rb", "a way up from inside" => "lib/../../outside.rb",
                  "an option for a command" => "-e", "git's own files" => ".git/config",
-                 "a user's home" => "~nosuchuser/x_test.rb", "a NUL byte" => "lib/a\0b_test.rb"}.freeze
+                 "a user's home" => "~nosuchuser/x_test.rb", "the current user's home" => "~/spec.rb", "a NUL byte" => "lib/a\0b_test.rb"}.freeze
 
   def setup
     @base = Dir.mktmpdir("giraffe-safe-path-test-")
@@ -49,10 +49,6 @@ class SafePathTest < Minitest::Test
     LEADING_OUT.each do |what, name|
       %i[file target].each { |ask| assert_equal "invalid relative proof path: #{name}", refusal(ask, name), "#{ask}: #{what}" }
     end
-  end
-
-  def test_home_is_not_in_the_tree
-    %i[file target].each { |ask| assert_equal "invalid relative proof path: ~/spec.rb", refusal(ask, "~/spec.rb") }
   end
 
   def test_a_tilde_inside_a_name_is_just_a_character
