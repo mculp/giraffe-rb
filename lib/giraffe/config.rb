@@ -32,6 +32,9 @@ module Giraffe
         %w[repo runs_dir].each do |key|
           @data[key] = File.expand_path(@data.fetch(key, key == "runs_dir" ? ".giraffe/runs" : "."), relative_to)
         end
+        if @data["backend"] == "sqlite"
+          @data["database"] = File.expand_path(@data.fetch("database", File.join(@data["runs_dir"], "giraffe.sqlite3")), relative_to)
+        end
         @data["script"] = File.expand_path(@data["script"], relative_to) if @data["script"]
         @data["profiles"] = load_profiles(relative_to)
       end
@@ -43,13 +46,14 @@ module Giraffe
     private
 
     def validate!
-      unknown = data.keys - DEFAULTS.keys - %w[repo runs_dir context github_repo script profiles]
+      unknown = data.keys - DEFAULTS.keys - %w[repo runs_dir context database github_repo script profiles]
       raise Error, "unknown configuration key(s): #{unknown.join(', ')}" if unknown.any?
-      raise Error, "repo does not exist" unless File.directory?(data.fetch("repo"))
-      raise Error, "context is required (Temper context ref)" if data["store"] == "mirrored" && !data["context"].to_s.match?(PrGraph::TemperCli::CONTEXT_REF)
-      raise Error, "store must be local or mirrored" unless %w[local mirrored].include?(data["store"])
       # A run started before backend existed has none, and stays readable.
-      raise Error, "backend must be #{Backends.names.join(' or ')}" unless Backends.names.include?(data.fetch("backend", Backends::DEFAULT))
+      backend = data.fetch("backend", Backends::DEFAULT)
+      raise Error, "backend must be #{Backends.names.join(' or ')}, not #{backend}" unless Backends.names.include?(backend)
+      raise Error, "repo does not exist" unless File.directory?(data.fetch("repo"))
+      validate_backend_keys!(backend)
+      raise Error, "store must be local or mirrored" unless %w[local mirrored].include?(data["store"])
       raise Error, "models must map role names to model names" unless data["models"].is_a?(Hash) && data["models"].all? { |key, value| key.is_a?(String) && value.is_a?(String) && !value.empty? }
       raise Error, "github_repo must be OWNER/NAME" unless data["github_repo"].to_s.match?(PrGraph::PrCiContract::REPOSITORY_NAME)
       raise Error, "base must be a Git ref" if data["base"].to_s.empty? || data["base"].start_with?("-") || data["base"].match?(/[\r\n]/)
@@ -69,6 +73,16 @@ module Giraffe
       end
       raise Error, "runner must be claude or scripted" unless %w[claude scripted].include?(data["runner"])
       %w[dry_run sandbox_checks].each { |key| raise Error, "#{key} must be boolean" unless [true, false].include?(data[key]) }
+    end
+
+    def validate_backend_keys!(backend)
+      if backend == "sqlite"
+        raise Error, "context is not read by the sqlite backend" if data.key?("context")
+        raise Error, "database must be a file path" unless data["database"].is_a?(String) && !data["database"].empty?
+      else
+        raise Error, "database is not read by the #{backend} backend" if data.key?("database")
+        raise Error, "context is required (Temper context ref)" if data["store"] == "mirrored" && !data["context"].to_s.match?(PrGraph::TemperCli::CONTEXT_REF)
+      end
     end
 
     # Only when a run starts: one already under way keeps what it was started with, and stays readable.
