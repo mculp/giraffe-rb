@@ -75,6 +75,8 @@ class HarnessTest < Minitest::Test
   end
 
   def teardown
+    return unless @tmp # setup skipped before it made anything
+
     ENV.replace(@old_env)
     FileUtils.remove_entry(@tmp)
   end
