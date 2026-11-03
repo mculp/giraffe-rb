@@ -142,6 +142,11 @@ class HarnessTest < Minitest::Test
     assert_includes calls.last[:prompt], "Use fixed"
   end
 
+  def test_a_run_gets_the_runner_its_configuration_names
+    assert_instance_of Giraffe::Runners::Claude, Giraffe::Runners.for(start(runner: "claude"), command: @command)
+    assert_instance_of Giraffe::Runners::Scripted, Giraffe::Runners.for(start(runner: "scripted"), command: @command)
+  end
+
   def test_dirty_source_fails_before_any_model
     File.write(File.join(@repo, "unrelated.txt"), "private work")
     run = start

@@ -7,8 +7,7 @@ require_relative "checks"
 require_relative "model"
 require_relative "mutation_runner"
 require_relative "screen_checks"
-require_relative "runners/claude"
-require_relative "runners/scripted"
+require_relative "runners"
 require_relative "steps/preparation"
 require_relative "steps/build"
 require_relative "steps/verify"
@@ -30,13 +29,7 @@ module Giraffe
       @git = Git.new(command: command)
       @checks = checks || Checks.new(run.config, command: command)
       @github = github || PrGraph::GitHubPrCi.new
-      runner ||= if run.config["runner"] == "scripted"
-                   Runners::Scripted.new(run.config["script"], positions: runtime.fetch("script_positions", {}),
-                                        on_advance: ->(positions) { checkpoint("script_positions", positions) })
-                 else
-                   Runners::Claude.new(run.config, command: command)
-                 end
-      @model = Model.new(run, runner, git: @git)
+      @model = Model.new(run, runner || Runners.for(run, command: command), git: @git)
     end
 
     def run
