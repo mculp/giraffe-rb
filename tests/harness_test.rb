@@ -373,7 +373,143 @@ class HarnessTest < Minitest::Test
     assert_equal "[]", output.lines.last.strip
   end
 
+  def test_sqlite_outage_then_sync_adds_only_the_missing_rows_and_repeats_add_none
+    path = sqlite_path
+    run = start(store: "mirrored", backend: "sqlite", database: path)
+    before = sqlite_select(path, "SELECT * FROM records ORDER BY id")
+    loaded = Giraffe::Run.load(run.path)
+    during_sqlite_outage(path) do
+      loaded.coordinator.start("TRIAGE")
+      refute loaded.sync["synced"]
+    end
+    assert_equal before, sqlite_select(path, "SELECT * FROM records ORDER BY id"), "nothing reaches the database during the outage"
+    assert loaded.sync["synced"]
+    synced = sqlite_select(path, "SELECT * FROM records ORDER BY id")
+    assert_equal before, synced.first(before.length)
+    assert_equal loaded.events.length, sqlite_events(path, run.id).length
+    2.times { assert loaded.sync["synced"] }
+    assert_equal synced, sqlite_select(path, "SELECT * FROM records ORDER BY id")
+  end
+
+  def test_sqlite_sync_reports_a_diverged_history_naming_the_database_not_temper
+    path = sqlite_path
+    run = start(store: "mirrored", backend: "sqlite", database: path)
+    assert run.sync["synced"]
+    stray = {"transition_id" => SecureRandom.uuid, "events" => [{"seq" => 99, "e" => "stray"}]}
+    sqlite_exec(path, "INSERT INTO records (run_id, kind, content, precedence, correlation) VALUES (?, ?, ?, ?, ?)",
+                run.id, PrGraph::Shapes::EVENT_LOG, JSON.generate(stray), 99, run.id)
+    status = run.sync
+    refute status["synced"]
+    assert_includes status["error"], "#{path} history diverges"
+    refute_includes status["error"], "Temper"
+  end
+
+  def test_cli_restore_from_sqlite_rebuilds_a_run_that_validates_with_events_in_recorded_order
+    path = sqlite_path
+    run = start(store: "mirrored", backend: "sqlite", database: path)
+    execute(run)
+    assert run.sync["synced"]
+    restored = cli("restore", run.id, "--database", path, "--ticket", ticket["id"], "--destination", File.join(@tmp, "restored"))
+    assert_equal "restored", restored["status"]
+    assert_equal run.id, cli("status", restored["path"]).dig("graph", "run_id")
+    sequence = Giraffe::Run.load(restored["path"]).events.map { |event| event["seq"] }
+    assert_equal run.events.map { |event| event["seq"] }, sequence
+    assert_equal sequence.sort.uniq, sequence
+    assert_equal sequence, sqlite_events(path, run.id).map { |event| event["seq"] }
+  end
+
+  def test_cli_restore_refuses_a_sqlite_history_whose_stored_record_was_tampered_with
+    path = sqlite_path
+    run = start(store: "mirrored", backend: "sqlite", database: path)
+    execute(run)
+    assert run.sync["synced"]
+    id, text = sqlite_select(path, "SELECT id, content FROM records WHERE run_id = ? AND kind = ? ORDER BY id LIMIT 1", run.id, PrGraph::Shapes::EVENT_LOG).first
+    content = JSON.parse(text)
+    content["events"][0]["seq"] += 100
+    sqlite_exec(path, "UPDATE records SET content = ? WHERE id = ?", JSON.generate(content), id)
+    destination = File.join(@tmp, "restored")
+    refute_empty cli_failure("restore", run.id, "--database", path, "--ticket", ticket["id"], "--destination", destination)
+    refute File.exist?(File.join(destination, "run.jsonl"))
+  end
+
+  def test_cli_restore_refuses_a_database_other_than_the_one_the_run_froze
+    path = sqlite_path
+    run = start(store: "mirrored", backend: "sqlite", database: path)
+    assert run.sync["synced"]
+    copy = File.join(@tmp, "copy.sqlite3")
+    FileUtils.cp(path, copy)
+    message = cli_failure("restore", run.id, "--database", copy, "--ticket", ticket["id"], "--destination", File.join(@tmp, "restored"))
+    assert_includes message, "checkpoint identity mismatch"
+  end
+
+  def test_cli_restore_from_sqlite_refuses_a_checkpoint_frozen_on_temper
+    path = sqlite_path
+    run = start(store: "mirrored", backend: "sqlite", database: path)
+    assert run.sync["synced"]
+    id, text = sqlite_select(path, "SELECT id, content FROM records WHERE run_id = ? AND kind = ? ORDER BY id DESC LIMIT 1", run.id, PrGraph::Shapes::HARNESS).first
+    state = JSON.parse(text)
+    state["config"] = state["config"].except("backend", "database").merge("context" => "+test/runs")
+    sqlite_exec(path, "UPDATE records SET content = ? WHERE id = ?", JSON.generate(state), id)
+    message = cli_failure("restore", run.id, "--database", path, "--ticket", ticket["id"], "--destination", File.join(@tmp, "restored"))
+    assert_includes message, "checkpoint identity mismatch"
+  end
+
+  def test_cli_restore_takes_exactly_one_of_context_and_database
+    run = start(store: "mirrored")
+    assert run.sync["synced"]
+    common = [run.id, "--ticket", ticket["id"], "--destination", File.join(@tmp, "restored")]
+    both = cli_failure("restore", *common, "--context", "+test/runs", "--database", sqlite_path)
+    assert_match(/not both/, both)
+    neither = cli_failure("restore", *common)
+    assert_includes neither, "--context"
+    assert_includes neither, "--database"
+    refute File.exist?(File.join(@tmp, "restored"))
+    refute File.exist?(sqlite_path)
+  end
+
+  def test_runs_frozen_on_temper_keep_syncing_to_temper_after_giraffe_json_is_edited_to_sqlite
+    path = sqlite_path
+    temper = start(store: "mirrored")
+    older = Giraffe::Run.start(Giraffe::Config.new(config(store: "mirrored").data.except("backend")), ticket.merge("id" => "DEMO-2"))
+    refute older.state["config"].key?("backend")
+    edited = File.join(@tmp, "giraffe.json")
+    File.write(edited, JSON.generate(config(store: "mirrored", backend: "sqlite", database: path).data))
+    [temper, older].each do |started|
+      loaded = Giraffe::Run.load(started.path)
+      loaded.coordinator.start("TRIAGE")
+      assert loaded.sync["synced"]
+    end
+    held = JSON.parse(File.read(ENV["FAKE_TEMPER_CONTEXT"]))["rows"].map { |row| row.dig("open_meta", "giraffe_run_id") }
+    assert_equal [temper.id, older.id].sort, held.sort
+    refute File.exist?(path), "a run started on Temper writes nothing to a SQLite file"
+  end
+
   def sqlite_path = File.join(@tmp, "runs.sqlite3")
+
+  # The events a run's event-log records hold, in the order they were committed.
+  def sqlite_events(path, id)
+    sqlite_select(path, "SELECT content FROM records WHERE run_id = ? AND kind = ? ORDER BY id", id, PrGraph::Shapes::EVENT_LOG)
+      .flat_map { |row| JSON.parse(row.first).fetch("events") }
+  end
+
+  # The database is out of reach for the block, as when its disk is away, and back afterwards.
+  def during_sqlite_outage(path)
+    away = "#{path}.away"
+    File.rename(path, away)
+    Dir.mkdir(path)
+    yield
+  ensure
+    Dir.rmdir(path) if File.directory?(path)
+    File.rename(away, path) if File.exist?(away)
+  end
+
+  # Runs the CLI expecting it to refuse, and returns the error it printed.
+  def cli_failure(*arguments)
+    result = @command.capture([RbConfig.ruby, File.join(ROOT, "bin/giraffe"), *arguments], cwd: @tmp)
+    refute_equal 0, result["status"]
+    JSON.parse(result["stderr"]).fetch("error")
+  end
+
   def sqlite_settings(path) = {"backend" => "sqlite", "database" => path}
   def sqlite_mirror(path, id) = Giraffe::Backends.mirror(sqlite_settings(path), run_id: id, ticket: ticket["id"])
 
