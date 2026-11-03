@@ -279,6 +279,25 @@ class HarnessTest < Minitest::Test
     assert_equal [[id]], sqlite_select(path, "SELECT run_id FROM runs")
   end
 
+  # Every append reads a kind's records for its run back, and one file holds many runs, so that read has to come from the
+  # index, already in commit order, instead of scanning every run's records. A file made before the index existed gets it
+  # the next time a mirror opens it.
+  def test_a_kinds_records_are_read_through_an_index_and_a_file_without_one_gains_it_on_the_next_open
+    path = sqlite_path
+    id = SecureRandom.uuid
+    plan = lambda do
+      sql = "EXPLAIN QUERY PLAN SELECT content FROM records WHERE run_id = ? AND kind = ? ORDER BY id"
+      sqlite_select(path, sql, id, PrGraph::Shapes::EVENT_LOG).map(&:last).join("; ")
+    end
+    sqlite_mirror(path, id).open!
+    assert_match(/USING INDEX records_by_run_kind/, plan.call)
+    refute_match(/TEMP B-TREE/, plan.call, "the index also returns the records in the order they were committed")
+    sqlite_exec(path, "DROP INDEX records_by_run_kind")
+    refute_match(/INDEX/, plan.call)
+    sqlite_mirror(path, id).open!
+    assert_match(/USING INDEX records_by_run_kind/, plan.call)
+  end
+
   def test_the_same_record_committed_twice_is_appended_twice_and_read_once
     path = sqlite_path
     id = SecureRandom.uuid

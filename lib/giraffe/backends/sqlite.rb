@@ -15,7 +15,10 @@ module Giraffe
       SCHEMA = [
         "CREATE TABLE IF NOT EXISTS runs (run_id TEXT PRIMARY KEY, ticket TEXT, kind_map TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS records (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, " \
-        "kind TEXT NOT NULL, content TEXT NOT NULL, precedence, correlation)"
+        "kind TEXT NOT NULL, content TEXT NOT NULL, precedence, correlation)",
+        # Every append reads a kind's records for its run back, and one file holds many runs, so without this each read scans
+        # every run's records. `id` comes last so the same index also returns them in the order they were committed.
+        "CREATE INDEX IF NOT EXISTS records_by_run_kind ON records (run_id, kind, id)"
       ].freeze
 
       # A running run's mirror. It creates the file and the run's row when they are missing.
