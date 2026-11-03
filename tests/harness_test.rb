@@ -208,6 +208,21 @@ class HarnessTest < Minitest::Test
     assert_match(/unknown backend sqlite/, error.message)
   end
 
+  def test_backend_defaults_to_temper_and_nothing_else_is_accepted
+    assert_equal "temper", config["backend"]
+    assert_match(/backend must be temper/, assert_raises(Giraffe::Error) { config(backend: "sqlite") }.message)
+    assert_match(/backend must be temper/, assert_raises(Giraffe::Error) { config(backend: nil) }.message)
+  end
+
+  def test_run_started_without_a_backend_still_loads_and_mirrors_to_temper
+    older = Giraffe::Config.new(config(store: "mirrored").data.except("backend"))
+    run = Giraffe::Run.start(older, ticket)
+    refute run.state["config"].key?("backend")
+    assert Giraffe::Run.load(run.path).sync["synced"]
+    held = JSON.parse(File.read(ENV["FAKE_TEMPER_CONTEXT"]))["rows"].map { |row| row.dig("open_meta", "giraffe_run_id") }
+    assert_equal [run.id], held
+  end
+
   def test_verifier_that_changes_tracked_file_cannot_publish
     checks = Object.new
     calls = 0

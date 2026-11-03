@@ -4,12 +4,13 @@ require "json"
 require "digest"
 require_relative "../../scripts/pr_ci_contract"
 require_relative "../../scripts/temper_cli"
+require_relative "backends"
 require_relative "errors"
 
 module Giraffe
   class Config
     DEFAULTS = {
-      "store" => "mirrored", "base" => "origin/main", "pr_base" => "main", "spec_command" => [], "checks" => [], "lint" => [], "screen_checks" => [], "check_timeout" => 600,
+      "store" => "mirrored", "backend" => Backends::DEFAULT, "base" => "origin/main", "pr_base" => "main", "spec_command" => [], "checks" => [], "lint" => [], "screen_checks" => [], "check_timeout" => 600,
       "sandbox_checks" => true, "runner" => "claude", "claude_bin" => "claude", "model" => "sonnet", "models" => {},
       "max_turns" => 30, "call_budget_usd" => 3.0, "run_budget_usd" => 25.0, "call_timeout" => 900,
       "max_fix_rounds" => 3, "instructions" => [], "skills" => {}, "dry_run" => false
@@ -47,6 +48,8 @@ module Giraffe
       raise Error, "repo does not exist" unless File.directory?(data.fetch("repo"))
       raise Error, "context is required (Temper context ref)" if data["store"] == "mirrored" && !data["context"].to_s.match?(PrGraph::TemperCli::CONTEXT_REF)
       raise Error, "store must be local or mirrored" unless %w[local mirrored].include?(data["store"])
+      # A run started before backend existed has none, and stays readable.
+      raise Error, "backend must be #{Backends.names.join(' or ')}" unless Backends.names.include?(data.fetch("backend", Backends::DEFAULT))
       raise Error, "models must map role names to model names" unless data["models"].is_a?(Hash) && data["models"].all? { |key, value| key.is_a?(String) && value.is_a?(String) && !value.empty? }
       raise Error, "github_repo must be OWNER/NAME" unless data["github_repo"].to_s.match?(PrGraph::PrCiContract::REPOSITORY_NAME)
       raise Error, "base must be a Git ref" if data["base"].to_s.empty? || data["base"].start_with?("-") || data["base"].match?(/[\r\n]/)
