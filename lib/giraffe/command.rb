@@ -1,10 +1,8 @@
 # frozen_string_literal: true
 
-require "open3"
-require_relative "../../scripts/process_group"
 require_relative "errors"
 require_relative "command/invocation"
-require_relative "command/pipes"
+require_relative "command/execution"
 
 module Giraffe
   # Argument arrays only; shell commands for project checks are explicit, sandboxed inputs.
@@ -29,27 +27,7 @@ module Giraffe
 
     def capture(argv, cwd:, env: {}, timeout: 600, input: nil, clean_env: false, limit: LIMIT)
       invocation = Invocation.new(argv: argv, cwd: cwd, env: env, timeout: timeout, input: input, clean_env: clean_env, limit: limit)
-      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      output = error = status = nil
-      Open3.popen3(*invocation.popen3_args) do |stdin, stdout, stderr, waiter|
-        pipes = Pipes.new(stdin, stdout, stderr, invocation)
-        begin
-          loop do
-            raise Cancelled, "run cancelled" if @cancelled.call
-            raise CommandLimit, "#{invocation.label} timed out after #{invocation.timeout}s" if Process.clock_gettime(Process::CLOCK_MONOTONIC) - started > invocation.timeout
-            pipes.check!
-            pending = [waiter, *pipes.threads].find(&:alive?)
-            break unless pending
-            pending.join(0.025)
-          end
-          output, error = pipes.output
-          status = waiter.value.exitstatus || 128 + waiter.value.termsig.to_i
-        ensure
-          PrGraph::ProcessGroup.terminate(waiter.pid)
-          pipes.close
-        end
-      end
-      {"status" => status, "stdout" => output.force_encoding("UTF-8").scrub, "stderr" => error.force_encoding("UTF-8").scrub}
+      Execution.new(invocation, @cancelled).call
     end
 
     def run!(argv, **options)
