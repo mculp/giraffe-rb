@@ -14,8 +14,9 @@ linked private documents and remote prior art is not implemented yet.
 
 ## Configuration
 
-Needs Ruby 3.4+, Git, Claude Code 2.1.312+, `gh`, and a Temper CLI login for mirrored mode. No gems
-or TypeScript runtime are needed. Configure Git author identity and fetch the target repository's
+Needs Ruby 3.4+, Git, Claude Code 2.1.312+, `gh`, and a Temper CLI login for mirrored mode with the
+Temper backend. Temper users need no gems; the SQLite backend needs `gem install sqlite3`. No
+TypeScript runtime is needed. Configure Git author identity and fetch the target repository's
 base ref before starting. Paths below resolve relative to the configuration file.
 
 ```json
@@ -45,9 +46,23 @@ base ref before starting. Paths below resolve relative to the configuration file
 }
 ```
 
-A `mirrored` store copies the run's records to a `backend` as they are written. `temper` is the default and
-the only backend so far, so `backend` can be left out, and a run started before the key existed mirrors to
-Temper as it always has. `context`, the Temper context ref, is required when `store` is `mirrored`.
+A `mirrored` store copies the run's records to a `backend` as they are written. `temper` is the default, so
+`backend` can be left out, and a run started before the key existed mirrors to Temper as it always has.
+With Temper, `context`, the Temper context ref, is required when `store` is `mirrored`.
+
+`"backend": "sqlite"` mirrors to a SQLite file instead, with no Temper needed:
+
+```json
+"store": "mirrored",
+"backend": "sqlite",
+"database": "./.giraffe/giraffe.sqlite3"
+```
+
+`database` is a file path resolved against the configuration file, like `repo` and `runs_dir`. It defaults
+to `giraffe.sqlite3` inside `runs_dir`. One file holds many runs, as one Temper context does. `context` is
+only for Temper and `database` only for SQLite; a key the chosen backend does not read is refused. Any
+other `backend` is refused. The `sqlite3` gem is loaded only when SQLite is chosen; without it the run
+stops with a message naming `gem install sqlite3`.
 
 Commands are argument arrays. At least one executable check is mandatory, and so is `spec_command`, which
 selects the spec or example named by an audit. It must name `{spec}`; `{spec}` and `{line}` are
@@ -201,6 +216,28 @@ uploaded last. Transition IDs are deterministic, so lost acknowledgements can be
 ```sh
 bin/giraffe restore RUN_UUID --context +your-team/giraffe-runs --ticket ENG-123 --destination ./restored-run
 ```
+
+### SQLite backend
+
+SQLite stores a run's records append-only, each with its kind, precedence and correlation, and returns
+them in the order they were committed. Nothing is replaced or deleted, and a record written twice after a
+lost acknowledgement is read back once. Each commit is one transaction with a busy timeout, so runs
+sharing a file wait for each other instead of failing. The database pins a run to this release's
+contracts just as Temper does, and refuses a writer or reader using different ones. Restore's own
+validation still runs on top, because SQLite enforces none of Temper's shapes.
+
+A run keeps the backend it started with: its configuration is frozen at start, so editing `giraffe.json`
+affects only runs started afterwards. A run started before `backend` existed keeps using Temper.
+
+```sh
+bin/giraffe restore RUN_ID --database ./giraffe.sqlite3 --ticket ENG-123 --destination ./restored-run
+```
+
+Restore takes exactly one of `--context` (Temper) and `--database` (SQLite); both together, or neither,
+is refused. A `--database` path that does not exist fails naming the path and creates nothing. The
+checkpoint's identity must match: its frozen backend must be the one you restore from, and a SQLite
+restore requires its frozen `database` to equal the expanded `--database` path, otherwise restore refuses
+with a checkpoint identity mismatch.
 
 Restore validates journals, evidence hashes, sequence continuity, and coordinator manifests before
 installing files. Repository/worktree paths must still exist: relocating an active worktree onto a
