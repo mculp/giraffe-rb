@@ -96,6 +96,13 @@ class ProtectedPathsTest < Minitest::Test
     assert_equal %w[.env CLAUDE.md], protected_paths.among(%w[app.rb .env lib/x.rb CLAUDE.md])
   end
 
+  def test_letter_case_makes_no_difference_because_the_disk_may_ignore_it
+    respelled = %w[claude.md CLAUDE.md Agents.md .Claude/settings.json .Cursor/rules/x.mdc .GIT/config .Giraffe/s.json
+                   .HUSKY/pre-commit .ENV .Env.Local Credentials certs/Server.PEM config/Master.Key]
+    assert_equal respelled, protected_paths.among(respelled)
+    assert_empty protected_paths.among(%w[App.rb lib/Environment.rb .GitIgnore])
+  end
+
   def test_the_hooks_a_checkout_runs_are_protected_where_the_repository_keeps_them
     paths = %w[hooks/post-checkout hooks-extra/x docs/hooks/x]
     assert_equal %w[hooks/post-checkout], protected_paths(hooks_prefix: "hooks/").among(paths)
