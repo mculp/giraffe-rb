@@ -37,13 +37,15 @@ module Giraffe
     end
 
     # Installs a run's last fully synced checkpoint under `destination`. Returns its path and state.
-    def self.restore(id, context:, ticket:, destination:)
+    def self.restore(id, ticket:, destination:, context: nil, database: nil)
+      raise Error, "restore needs exactly one of context (Temper) or database (SQLite)" unless context.nil? ^ database.nil?
       raise Error, "invalid run ID" unless id.match?(PrGraph::EventLog::UUID)
       destination = File.expand_path(destination)
       raise Error, "restore destination must be empty" if File.exist?(destination) && Dir.children(destination).any?
-      remote = PrGraph::Store.new(backend: Backends.reader({"context" => context}, run_id: id, ticket: ticket), run_id: id)
+      settings = context ? {"backend" => "temper", "context" => context} : {"backend" => "sqlite", "database" => File.expand_path(database)}
+      remote = PrGraph::Store.new(backend: Backends.reader(settings, run_id: id, ticket: ticket), run_id: id)
       state = remote.latest_checkpoint || raise(Error, "no fully synced checkpoint")
-      raise Error, "checkpoint identity mismatch" unless state["run_id"] == id && state.dig("config", "context") == context
+      raise Error, "checkpoint identity mismatch" unless state["run_id"] == id && same_home?(state["config"], settings)
       FileUtils.mkdir_p(destination, mode: 0o700)
       path = File.join(destination, "run.jsonl")
       remote.hydrate(path)
@@ -51,6 +53,15 @@ module Giraffe
       LocalStore.new(path: path, run_id: id).append_state(state)
       [path, state]
     end
+
+    # A checkpoint belongs to the backend and the context or database it froze at start.
+    def self.same_home?(frozen, settings)
+      frozen ||= {}
+      return false unless (frozen["backend"] || Backends::DEFAULT) == settings["backend"]
+      key = settings["backend"] == "sqlite" ? "database" : "context"
+      frozen[key] == settings[key]
+    end
+    private_class_method :same_home?
 
     def self.store_for(path, state)
       run_id = state.fetch("run_id")
