@@ -8,7 +8,7 @@ module Giraffe
   # Local journals are authoritative on the execution host. The journals themselves are the outbox:
   # rebuilding a sync batch never depends on a separate queue entry surviving a crash.
   class LocalStore
-    attr_reader :path, :run_id, :context
+    attr_reader :path, :run_id
 
     # A run's file beside its event log, named by `suffix` in place of the log's extension.
     def self.sibling(path, suffix) = path.sub(/\.jsonl\z/, suffix)
@@ -22,8 +22,9 @@ module Giraffe
       raise Error, "local state journal is damaged; recover from the last Temper checkpoint"
     end
 
-    def initialize(path:, run_id:, context: nil, ticket:, mirror: true)
-      @path, @run_id, @context, @ticket, @mirror = path, run_id, context, ticket, mirror
+    # Mirrors to `backend` as it goes. Without one the run stays local.
+    def initialize(path:, run_id:, backend: nil)
+      @path, @run_id, @backend = path, run_id, backend
     end
 
     def event_log = @event_log ||= PrGraph::StoredEventLog.new(self)
@@ -54,11 +55,11 @@ module Giraffe
 
     def sync_status
       target = sibling(".sync.json")
-      File.exist?(target) ? JSON.parse(File.read(target)) : {"mode" => @mirror ? "mirrored" : "local", "synced" => false}
+      File.exist?(target) ? JSON.parse(File.read(target)) : {"mode" => mirrored? ? "mirrored" : "local", "synced" => false}
     end
 
     def sync(state)
-      return {"mode" => "local", "synced" => false} unless @mirror
+      return {"mode" => "local", "synced" => false} unless mirrored?
       logs = {
         PrGraph::Shapes::EVENT_LOG => event_log.validate_file!(path),
         PrGraph::Shapes::ARTIFACT_LOG => artifact_log.read(sibling(".artifacts.jsonl"), allow_empty: true),
@@ -99,8 +100,8 @@ module Giraffe
       write_sync_status({"mode" => "mirrored", "synced" => false, "error" => error.message})
     end
 
-    # What the Stored logs call to append: the journal takes the rows first, then Temper, and a row Temper
-    # misses waits for the next sync.
+    # What the Stored logs call to append: the journal takes the rows first, then the backend, and a row the
+    # backend misses waits for the next sync.
     def append(kind, _path, events, evidence: {})
       yield
       live do
@@ -116,9 +117,10 @@ module Giraffe
     private
 
     def sibling(suffix) = self.class.sibling(path, suffix)
+    def mirrored? = !@backend.nil?
 
     def remote
-      @remote ||= PrGraph::Store.new(context: context, run_id: run_id, ticket: @ticket, backoff: [], versioned: true).open!
+      @remote ||= PrGraph::Store.new(backend: @backend, run_id: run_id).open!
     end
 
     # A row's transition ID derives from its content, so a retry after a lost acknowledgement cannot add it twice.
@@ -129,7 +131,7 @@ module Giraffe
     end
 
     def live
-      return unless @mirror
+      return unless mirrored?
       write_sync_status({"mode" => "mirrored", "synced" => false, "pending_checkpoint" => true})
       yield
     rescue StandardError => error

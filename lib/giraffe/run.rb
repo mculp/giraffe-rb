@@ -4,6 +4,7 @@ require "json"
 require "fileutils"
 require "securerandom"
 require "time"
+require_relative "backends"
 require_relative "store"
 require_relative "local_store"
 require_relative "config"
@@ -40,18 +41,22 @@ module Giraffe
       raise Error, "invalid run ID" unless id.match?(PrGraph::EventLog::UUID)
       destination = File.expand_path(destination)
       raise Error, "restore destination must be empty" if File.exist?(destination) && Dir.children(destination).any?
-      remote = PrGraph::Store.new(context: context, run_id: id, ticket: ticket)
+      remote = PrGraph::Store.new(backend: Backends.build({"context" => context}, run_id: id, ticket: ticket), run_id: id)
       state = remote.latest_checkpoint || raise(Error, "no fully synced checkpoint")
       raise Error, "checkpoint identity mismatch" unless state["run_id"] == id && state.dig("config", "context") == context
       FileUtils.mkdir_p(destination, mode: 0o700)
       path = File.join(destination, "run.jsonl")
       remote.hydrate(path)
-      LocalStore.new(path: path, run_id: id, context: context, ticket: ticket, mirror: false).append_state(state)
+      # The state came from the backend, so there is nothing to mirror back.
+      LocalStore.new(path: path, run_id: id).append_state(state)
       [path, state]
     end
 
     def self.store_for(path, state)
-      LocalStore.new(path: path, context: state.dig("config", "context"), run_id: state.fetch("run_id"), ticket: state.dig("ticket", "id"), mirror: state.dig("config", "store") == "mirrored")
+      run_id = state.fetch("run_id")
+      # The journal is the retry queue, so a mirror never waits on a retry. It pins the run's kinds to this release's contracts.
+      backend = Backends.build(state["config"], run_id: run_id, ticket: state.dig("ticket", "id"), backoff: [], versioned: true) if state.dig("config", "store") == "mirrored"
+      LocalStore.new(path: path, run_id: run_id, backend: backend)
     end
     private_class_method :store_for
 

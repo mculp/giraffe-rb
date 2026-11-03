@@ -67,7 +67,8 @@ plugin can make it run a step it skipped.
 | `bin/giraffe` | The controller commands and `harness <run>` (rollout 3) |
 | `lib/giraffe/harness.rb`, `lib/giraffe/steps/` | The loop, and one file per code step (rollout 3) |
 | `lib/giraffe/runners/` | `claude.rb` (rollout 4), `cursor.rb` (rollout 5), and the scripted runner the tests use (rollout 3) |
-| `lib/giraffe/store.rb` | The run's Temper resource, the stored event, artifact, and failure logs and coordinator, and `hydrate`, all through `scripts/temper_cli.rb` (rollout 2) |
+| `lib/giraffe/store.rb` | The stored event, artifact, and failure logs and coordinator, and `hydrate`, over a backend (rollout 2) |
+| `lib/giraffe/backends/` | Where a run's records live: `temper.rb` holds the run's Temper resource, its kinds and its retries, all through `scripts/temper_cli.rb` |
 | `lib/giraffe/shapes.rb` | Builds the Temper shapes from `references/*-v1.json` when a store opens (rollout 2) |
 | `prompts/<step>.md`, `schemas/` | Each call's instructions, and the output schemas built from `references/*-v1.json` (rollout 4) |
 | `scripts/` | pr-graph's coordinator, contract, CI, feedback, seed, metrics, run record, and Temper scripts |

@@ -45,6 +45,7 @@ require "fileutils"
 require "json"
 require "securerandom"
 require File.join(ENV.fetch("GIRAFFE_ROOT"), "lib/giraffe/store")
+require File.join(ENV.fetch("GIRAFFE_ROOT"), "lib/giraffe/backends")
 
 module Fixture
   CONTEXT_FILE = ENV.fetch("FAKE_TEMPER_CONTEXT")
@@ -62,7 +63,8 @@ module Fixture
   module_function
 
   def store(run_id)
-    PrGraph::Store.new(context: ENV.fetch("CONTEXT"), run_id: run_id, ticket: "DEMO-1", backoff: [0, 0])
+    backend = Giraffe::Backends.build({"context" => ENV.fetch("CONTEXT")}, run_id: run_id, ticket: "DEMO-1", backoff: [0, 0])
+    PrGraph::Store.new(backend: backend, run_id: run_id)
   end
 
   def data
