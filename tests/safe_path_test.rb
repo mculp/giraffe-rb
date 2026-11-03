@@ -12,7 +12,8 @@ class SafePathTest < Minitest::Test
   LINKS = {"to_file_outside" => "../outside.rb", "to_file_inside" => "lib/x_test.rb", "to_dir_outside" => "../elsewhere",
            "to_neighbour" => "../tree-secrets", "dangling" => "../elsewhere/new.rb"}.freeze
   LEADING_OUT = {"an absolute path" => "/etc/passwd", "a way up" => "../outside.rb", "a way up from inside" => "lib/../../outside.rb",
-                 "an option for a command" => "-e", "git's own files" => ".git/config"}.freeze
+                 "an option for a command" => "-e", "git's own files" => ".git/config",
+                 "git's files in capitals" => ".GIT/config", "git's files in mixed case" => "a/.Git/x"}.freeze
 
   def setup
     @base = Dir.mktmpdir("giraffe-safe-path-test-")
