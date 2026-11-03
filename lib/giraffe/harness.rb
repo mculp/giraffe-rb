@@ -9,19 +9,13 @@ require_relative "screen_checks"
 require_relative "runners"
 require_relative "services"
 require_relative "step_context"
-require_relative "steps/preparation"
-require_relative "steps/build"
-require_relative "steps/verify"
-require_relative "steps/publish"
+require_relative "steps"
 
 module Giraffe
   # First vertical slice: the existing graph owns transitions through PUBLISH. Later gates remain
   # visibly incomplete. No model chooses a node, runs a check, commits or publishes.
   class Harness
-    include Steps::Preparation
-    include Steps::Build
-    include Steps::Verify
-    include Steps::Publish
+    Steps.mixins.each { |mixin| include mixin }
     ORDER = %w[TRIAGE WORKTREE INVESTIGATE REPRODUCE PLAN BUILD VERIFY PUBLISH].freeze
 
     def initialize(run, runner: nil, checks: nil, github: nil)
@@ -51,11 +45,7 @@ module Giraffe
           node = open ? open["node"] : ORDER.find { |name| projection["runnable"].include?(name) }
           raise Error, "no supported runnable step; inspect coordinator status" unless node
           attempt = open || @run.coordinator.start(node, worktree: protected?(node) ? worktree : nil)
-          @attempt = attempt.fetch("attempt_id")
-          @node = node
-          @context = StepContext.new(@run, @services, node, @attempt)
-          @model.begin_attempt(@attempt)
-          send("step_#{node.downcase}")
+          perform(node, attempt.fetch("attempt_id"))
           # Also moves the revision on, so this boundary's checkpoint is the one hydrate and restore pick.
           checkpoint("last_step", node)
           @run.sync
@@ -80,6 +70,17 @@ module Giraffe
     def state = @run.coordinator.snapshot
     def checkpoint(key, value) = @run.checkpoint(key, value)
     def worktree = File.join(@run.directory, "worktree")
+
+    # A node with a step object is done by it. The mixins are not steps yet, so any other node runs as its own method,
+    # which reads @node and @attempt and calls the helpers below, until the last of them is gone.
+    def perform(node, attempt)
+      @node, @attempt = node, attempt
+      @context = StepContext.new(@run, @services, node, attempt)
+      @model.begin_attempt(attempt)
+      (Steps.for(node) || legacy_step(node)).call(@context)
+    end
+
+    def legacy_step(node) = ->(_context) { send("step_#{node.downcase}") }
 
     # What the mixins call. The step that is running has its context answer them.
     def ac_audit_contract = @context.ac_audit_contract
