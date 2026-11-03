@@ -147,6 +147,17 @@ class HarnessTest < Minitest::Test
     assert_instance_of Giraffe::Runners::Scripted, Giraffe::Runners.for(start(runner: "scripted"), command: @command)
   end
 
+  def test_a_context_puts_what_its_attempt_already_put_once_and_refuses_different_evidence
+    run = start
+    services = Giraffe::Services.new(git: @git, checks: nil, github: @github, model: nil)
+    context = Giraffe::StepContext.new(run, services, "TRIAGE", run.coordinator.start("TRIAGE").fetch("attempt_id"))
+    brief = triage.merge("ticket" => ticket)
+    2.times { context.put("triage_brief", brief) }
+    assert_equal 1, run.coordinator.snapshot["artifacts"].count { |row| row["family"] == "triage_brief" }
+    error = assert_raises(Giraffe::Error) { context.put("triage_brief", brief.merge("summary" => "changed")) }
+    assert_equal "recovery would replace triage_brief with different evidence", error.message
+  end
+
   def test_dirty_source_fails_before_any_model
     File.write(File.join(@repo, "unrelated.txt"), "private work")
     run = start
