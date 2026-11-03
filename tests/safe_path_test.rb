@@ -108,4 +108,13 @@ class ProtectedPathsTest < Minitest::Test
     assert_equal %w[hooks/post-checkout], protected_paths(hooks_prefix: "hooks/").among(paths)
     assert_empty protected_paths.among(paths), "with no hooks in the tree there is nothing more to protect"
   end
+
+  def test_the_hooks_directory_is_matched_whatever_its_letter_case
+    assert_equal %w[Hooks/post-checkout], protected_paths(hooks_prefix: "hooks/").among(%w[Hooks/post-checkout docs/x])
+  end
+
+  def test_with_hooks_at_the_root_only_bare_hook_names_are_protected
+    paths = %w[post-checkout POST-CHECKOUT pre-commit sub/post-checkout README.md app.rb]
+    assert_equal %w[post-checkout POST-CHECKOUT pre-commit], protected_paths(hooks_prefix: "./").among(paths)
+  end
 end
