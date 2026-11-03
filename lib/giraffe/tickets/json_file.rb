@@ -5,11 +5,10 @@ require "json"
 module Giraffe
   module Tickets
     # A file is also useful for private/offline ticket sources; the same fields reach the model.
-    class File
+    class JsonFile
       def initialize(path) = @path = path
 
-      # ::File, because inside Tickets a bare File is this class.
-      def fetch = JSON.parse(::File.read(@path))
+      def fetch = JSON.parse(File.read(@path))
     end
   end
 end

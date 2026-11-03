@@ -1,8 +1,8 @@
 # frozen_string_literal: true
 
 require_relative "errors"
-require_relative "tickets/file"
 require_relative "tickets/https"
+require_relative "tickets/json_file"
 require_relative "tickets/linear"
 require_relative "tickets/validated"
 
@@ -13,7 +13,7 @@ module Giraffe
     def self.load(identifier: nil, file: nil) = Validated.new(source(identifier, file)).fetch
 
     def self.source(identifier, file)
-      return Tickets::File.new(file) if file
+      return JsonFile.new(file) if file
       raise Error, "a ticket identifier or --ticket-file is required" if identifier.to_s.empty?
       Linear.new(identifier, http: Https.new, env: ENV)
     end
