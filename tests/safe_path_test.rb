@@ -12,7 +12,8 @@ class SafePathTest < Minitest::Test
   LINKS = {"to_file_outside" => "../outside.rb", "to_file_inside" => "lib/x_test.rb", "to_dir_outside" => "../elsewhere",
            "to_neighbour" => "../tree-secrets", "dangling" => "../elsewhere/new.rb"}.freeze
   LEADING_OUT = {"an absolute path" => "/etc/passwd", "a way up" => "../outside.rb", "a way up from inside" => "lib/../../outside.rb",
-                 "an option for a command" => "-e", "git's own files" => ".git/config"}.freeze
+                 "an option for a command" => "-e", "git's own files" => ".git/config",
+                 "a user's home" => "~nosuchuser/x_test.rb", "a NUL byte" => "lib/a\0b_test.rb"}.freeze
 
   def setup
     @base = Dir.mktmpdir("giraffe-safe-path-test-")
@@ -50,9 +51,12 @@ class SafePathTest < Minitest::Test
     end
   end
 
-  # Expanded by the filesystem call that places it, so only the check on where it lands stops it.
   def test_home_is_not_in_the_tree
-    %i[file target].each { |ask| assert_equal "proof path escapes its worktree: ~/spec.rb", refusal(ask, "~/spec.rb") }
+    %i[file target].each { |ask| assert_equal "invalid relative proof path: ~/spec.rb", refusal(ask, "~/spec.rb") }
+  end
+
+  def test_a_tilde_inside_a_name_is_just_a_character
+    assert_equal real("lib/~foo"), safe_path.target("lib/~foo")
   end
 
   def test_a_file_is_refused_when_it_is_a_link_or_is_reached_through_one_that_leaves_the_tree

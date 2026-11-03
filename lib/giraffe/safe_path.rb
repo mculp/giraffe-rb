@@ -38,8 +38,12 @@ module Giraffe
       path
     end
 
-    # A leading dash is an option to whatever command is handed the path.
-    def unusable?(relative) = relative.start_with?("/", "-") || relative.split("/").intersect?(OFF_LIMITS)
+    # A leading dash is an option to whatever command is handed the path. A leading tilde names someone's home
+    # directory, and Ruby cannot even place a NUL byte; File.expand_path would raise ArgumentError for either, which
+    # is not the InvalidOutput that makes resuming ask the model again.
+    def unusable?(relative)
+      relative.start_with?("/", "-", "~") || relative.include?("\0") || relative.split("/").intersect?(OFF_LIMITS)
+    end
 
     def regular_file?(path) = File.file?(path) && !File.symlink?(path) && inside?(File.realpath(path))
 
