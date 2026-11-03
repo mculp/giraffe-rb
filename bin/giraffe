@@ -12,12 +12,13 @@ begin
   ARGV.unshift(command) if %w[-h --help].include?(command)
   options = {}
   parser = OptionParser.new do |opts|
-    opts.banner = "Usage: giraffe start TICKET --config FILE [--ticket-file FILE] [--dry-run]\n       giraffe status|graph|events|harness|resume|sync|cancel RUN.jsonl\n       giraffe answer RUN.jsonl QUESTION_ID ANSWER\n       giraffe restore RUN_ID --context REF --ticket ID --destination DIR"
+    opts.banner = "Usage: giraffe start TICKET --config FILE [--ticket-file FILE] [--dry-run]\n       giraffe status|graph|events|harness|resume|sync|cancel RUN.jsonl\n       giraffe answer RUN.jsonl QUESTION_ID ANSWER\n       giraffe restore RUN_ID --context REF --ticket ID --destination DIR\n       giraffe restore RUN_ID --database PATH --ticket ID --destination DIR"
     opts.on("--after SEQ", Integer) { |value| options[:after] = value }
     opts.on("--config FILE") { |value| options[:config] = value }
     opts.on("--ticket-file FILE") { |value| options[:ticket_file] = value }
     opts.on("--dry-run") { options[:dry_run] = true }
     opts.on("--context REF") { |value| options[:context] = value }
+    opts.on("--database PATH") { |value| options[:database] = value }
     opts.on("--ticket ID") { |value| options[:ticket] = value }
     opts.on("--destination DIR") { |value| options[:destination] = value }
     opts.on("-h", "--help") { puts opts; exit }
@@ -56,8 +57,10 @@ begin
              end
            when "restore"
              id = ARGV.shift || raise(Giraffe::Error, "run ID is required")
-             %i[context ticket destination].each { |key| raise Giraffe::Error, "--#{key} is required" unless options[key] }
-             path, state = Giraffe::Run.restore(id, **options.slice(:context, :ticket, :destination))
+             raise Giraffe::Error, "restore takes either --context REF or --database PATH, not both" if options[:context] && options[:database]
+             raise Giraffe::Error, "restore needs --context REF or --database PATH" unless options[:context] || options[:database]
+             %i[ticket destination].each { |key| raise Giraffe::Error, "--#{key} is required" unless options[key] }
+             path, state = Giraffe::Run.restore(id, **options.slice(:context, :database, :ticket, :destination))
              {"path" => path, "status" => "restored", "revision" => state["revision"], "note" => "Repository and worktree paths must still exist; cross-host relocation is not implemented."}
            else
              puts parser
