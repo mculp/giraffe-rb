@@ -3,6 +3,7 @@
 require "open3"
 require_relative "../../scripts/process_group"
 require_relative "errors"
+require_relative "command/invocation"
 
 module Giraffe
   # Argument arrays only; shell commands for project checks are explicit, sandboxed inputs.
@@ -26,18 +27,18 @@ module Giraffe
     end
 
     def capture(argv, cwd:, env: {}, timeout: 600, input: nil, clean_env: false, limit: LIMIT)
-      raise Error, "command must be a nonempty argument array" unless argv.is_a?(Array) && argv.any? && argv.all? { |part| part.is_a?(String) }
+      invocation = Invocation.new(argv: argv, cwd: cwd, env: env, timeout: timeout, input: input, clean_env: clean_env, limit: limit)
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       output = error = status = nil
-      Open3.popen3(env, *argv, chdir: cwd, pgroup: true, unsetenv_others: clean_env) do |stdin, stdout, stderr, waiter|
+      Open3.popen3(*invocation.popen3_args) do |stdin, stdout, stderr, waiter|
         readers = [stdout, stderr].map do |stream|
           Thread.new do
             Thread.current.report_on_exception = false
             data = +""
             while (chunk = stream.read(16_384))
               data << chunk
-              if data.bytesize > limit
-                raise CommandLimit, "#{argv.first(2).join(' ')} output exceeds #{limit} bytes"
+              if data.bytesize > invocation.limit
+                raise CommandLimit, "#{invocation.label} output exceeds #{invocation.limit} bytes"
               end
             end
             data
@@ -46,7 +47,7 @@ module Giraffe
         writer = Thread.new do
           Thread.current.report_on_exception = false
           begin
-            stdin.write(input) if input
+            stdin.write(invocation.input) if invocation.input
           rescue Errno::EPIPE
             nil
           ensure
@@ -56,7 +57,7 @@ module Giraffe
         begin
           loop do
             raise Cancelled, "run cancelled" if @cancelled.call
-            raise CommandLimit, "#{argv.first(2).join(' ')} timed out after #{timeout}s" if Process.clock_gettime(Process::CLOCK_MONOTONIC) - started > timeout
+            raise CommandLimit, "#{invocation.label} timed out after #{invocation.timeout}s" if Process.clock_gettime(Process::CLOCK_MONOTONIC) - started > invocation.timeout
             readers.each { |thread| thread.value unless thread.alive? }
             pending = [waiter, *readers, writer].find(&:alive?)
             break unless pending
