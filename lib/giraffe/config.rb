@@ -76,13 +76,17 @@ module Giraffe
     end
 
     def validate_backend_keys!(backend)
-      if backend == "sqlite"
-        raise Error, "context is not read by the sqlite backend" if data.key?("context")
-        raise Error, "database must be a file path" unless data["database"].is_a?(String) && !data["database"].empty?
-      else
-        raise Error, "database is not read by the #{backend} backend" if data.key?("database")
-        raise Error, "context is required (Temper context ref)" if data["store"] == "mirrored" && !data["context"].to_s.match?(PrGraph::TemperCli::CONTEXT_REF)
-      end
+      backend == "sqlite" ? validate_sqlite_keys! : validate_temper_keys!(backend)
+    end
+
+    def validate_sqlite_keys!
+      raise Error, "context is not read by the sqlite backend" if data.key?("context")
+      raise Error, "database must be a file path" unless data["database"].is_a?(String) && !data["database"].empty?
+    end
+
+    def validate_temper_keys!(backend)
+      raise Error, "database is not read by the #{backend} backend" if data.key?("database")
+      raise Error, "context is required (Temper context ref)" if data["store"] == "mirrored" && !data["context"].to_s.match?(PrGraph::TemperCli::CONTEXT_REF)
     end
 
     # Only when a run starts: one already under way keeps what it was started with, and stays readable.

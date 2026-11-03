@@ -20,10 +20,11 @@ module Giraffe
         # every run's records. `id` comes last so the same index also returns them in the order they were committed.
         "CREATE INDEX IF NOT EXISTS records_by_run_kind ON records (run_id, kind, id)"
       ].freeze
+      INSERT_RUN = "INSERT OR IGNORE INTO runs (run_id, ticket, kind_map) VALUES (?, ?, ?)"
+      INSERT_RECORD = "INSERT INTO records (run_id, kind, content, precedence, correlation) VALUES (?, ?, ?, ?, ?)"
 
       # A running run's mirror. It creates the file and the run's row when they are missing.
       def self.mirror(settings, run_id:, ticket:)
-        load_driver # live writes swallow errors into the sync status, so a missing gem must fail here, where the run is built
         new(path: settings.fetch("database"), run_id: run_id, ticket: ticket, creating: true)
       end
 
@@ -32,14 +33,10 @@ module Giraffe
         new(path: settings.fetch("database"), run_id: run_id, ticket: ticket, creating: false)
       end
 
-      # The gem is optional, so only a run that chose this backend needs it.
-      def self.load_driver
-        require "sqlite3"
-      rescue LoadError
-        raise Error, "the sqlite backend needs the sqlite3 gem: gem install sqlite3"
-      end
-
+      # The driver loads when the backend is built, not at its first call: live writes swallow errors into the sync status,
+      # so a missing gem must fail here, where the run is built.
       def initialize(path:, run_id:, ticket:, creating:)
+        load_driver
         @path = path
         @run_id = run_id
         @ticket = ticket
@@ -48,27 +45,16 @@ module Giraffe
 
       # Ensures the schema and the run's row. Idempotent: a run has exactly one row.
       def open!
-        guard do
-          if @creating
-            db.transaction(:immediate) do
-              SCHEMA.each { |sql| db.execute(sql) }
-              db.execute("INSERT OR IGNORE INTO runs (run_id, ticket, kind_map) VALUES (?, ?, ?)",
-                         [run_id, @ticket, JSON.generate(KindMap.current)])
-            end
-          end
-          check_pin
-        end
+        create if @creating
+        guard { check_pin }
         self
       end
 
       # Appends one record and returns its ID.
       def commit(kind:, content:, precedence:, correlation:)
-        guard do
-          db.transaction(:immediate) do
-            db.execute("INSERT INTO records (run_id, kind, content, precedence, correlation) VALUES (?, ?, ?, ?, ?)",
-                       [run_id, kind, JSON.generate(content), precedence, correlation])
-            db.last_insert_row_id.to_s
-          end
+        write do
+          db.execute(INSERT_RECORD, [run_id, kind, JSON.generate(content), precedence, correlation])
+          db.last_insert_row_id.to_s
         end
       end
 
@@ -98,6 +84,13 @@ module Giraffe
 
       attr_reader :path, :run_id
 
+      # The gem is optional, so only a run that chose this backend needs it.
+      def load_driver
+        require "sqlite3"
+      rescue LoadError
+        raise Error, "the sqlite backend needs the sqlite3 gem: gem install sqlite3"
+      end
+
       def db
         @db ||= connect
       end
@@ -108,13 +101,23 @@ module Giraffe
         SQLite3::Database.new(path, readonly: !@creating).tap { |database| database.busy_timeout = BUSY_TIMEOUT_MS }
       end
 
-      def guard
-        self.class.load_driver
-        begin
-          yield
-        rescue SQLite3::Exception => e
-          raise Error, "#{path}: #{e.message}"
+      # The schema and the run's row in one transaction, so a run is never half made.
+      def create
+        write do
+          SCHEMA.each { |sql| db.execute(sql) }
+          db.execute(INSERT_RUN, [run_id, @ticket, JSON.generate(KindMap.current)])
         end
+      end
+
+      # Immediate, so a writer takes the lock where it begins and waits on the busy timeout there, instead of failing
+      # partway when a deferred transaction tries to upgrade.
+      def write(&block) = guard { db.transaction(:immediate, &block) }
+
+      # Whatever SQLite refuses reaches callers as the Error every backend raises, naming the file.
+      def guard
+        yield
+      rescue SQLite3::Exception => e
+        raise Error, "#{path}: #{e.message}"
       end
 
       def tables?

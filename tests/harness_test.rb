@@ -503,6 +503,58 @@ class HarnessTest < Minitest::Test
     refute File.exist?(sqlite_path)
   end
 
+  # A restore says where to read from with exactly one of its two flags, and the refusal says which flags it takes.
+  def test_a_home_is_named_by_exactly_one_of_a_context_and_a_database
+    both = assert_raises(Giraffe::Error) { Giraffe::Backends::Home.from(context: "+test/runs", database: sqlite_path) }
+    assert_equal "restore takes either --context REF or --database PATH, not both", both.message
+    [{}, {context: nil, database: nil}].each do |nothing|
+      neither = assert_raises(Giraffe::Error) { Giraffe::Backends::Home.from(**nothing) }
+      assert_equal "restore needs --context REF or --database PATH", neither.message
+    end
+  end
+
+  # The settings a home answers are what Backends.reader builds a backend from: a Temper context as given, and a SQLite
+  # database as an absolute path, which is the form a run freezes it in.
+  def test_a_home_answers_the_settings_its_backend_reader_is_built_from
+    context = Giraffe::Backends::Home.from(context: "+test/runs").settings
+    assert_equal({"backend" => "temper", "context" => "+test/runs"}, context)
+    temper = Giraffe::Backends.reader(context, run_id: SecureRandom.uuid, ticket: ticket["id"])
+    assert_instance_of Giraffe::Backends::Temper, temper
+    assert_equal "+test/runs", temper.to_s
+    database = Giraffe::Backends::Home.from(database: "data/runs.sqlite3").settings
+    assert_equal %w[backend database], database.keys
+    assert_equal "sqlite", database["backend"]
+    assert File.absolute_path?(database["database"]), "#{database['database']} is not absolute"
+    assert database["database"].end_with?("/data/runs.sqlite3")
+    sqlite = Giraffe::Backends.reader(database, run_id: SecureRandom.uuid, ticket: ticket["id"])
+    assert_instance_of Giraffe::Backends::Sqlite, sqlite
+    assert_equal database["database"], sqlite.to_s
+  end
+
+  # A checkpoint belongs to the backend and context its configuration froze at start. A configuration from before `backend`
+  # existed, or one that leaves it nil, froze Temper, and no configuration at all names no home.
+  def test_a_temper_home_is_named_only_by_a_configuration_frozen_on_temper_with_the_same_context
+    home = Giraffe::Backends::Home.from(context: "+test/runs")
+    [{"backend" => "temper", "context" => "+test/runs"}, {"context" => "+test/runs"}, {"backend" => nil, "context" => "+test/runs"}].each do |frozen|
+      assert home.named_by?(frozen), "#{frozen.inspect} should name the home"
+    end
+    [{"backend" => "temper", "context" => "+other/runs"}, {"backend" => "temper"}, {"backend" => "sqlite", "context" => "+test/runs"},
+     {"backend" => "sqlite", "database" => sqlite_path}, {}, nil].each do |frozen|
+      refute home.named_by?(frozen), "#{frozen.inspect} should not name the home"
+    end
+  end
+
+  # A SQLite home is named only by a configuration frozen on SQLite with the same database file. One from before `backend`
+  # existed froze Temper, so it never names a SQLite home, whatever else it holds.
+  def test_a_sqlite_home_is_named_only_by_a_configuration_frozen_on_sqlite_with_the_same_database
+    home = Giraffe::Backends::Home.from(database: sqlite_path)
+    assert home.named_by?({"backend" => "sqlite", "database" => sqlite_path})
+    [{"backend" => "sqlite", "database" => File.join(@tmp, "other.sqlite3")}, {"backend" => "sqlite"}, {"backend" => "temper", "database" => sqlite_path},
+     {"database" => sqlite_path}, {"context" => "+test/runs"}, {}, nil].each do |frozen|
+      refute home.named_by?(frozen), "#{frozen.inspect} should not name the home"
+    end
+  end
+
   def test_runs_frozen_on_temper_keep_syncing_to_temper_after_giraffe_json_is_edited_to_sqlite
     path = sqlite_path
     temper = start(store: "mirrored")
