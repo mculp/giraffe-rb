@@ -38,7 +38,8 @@ module Giraffe
 
     # Installs a run's last fully synced checkpoint under `destination`. Returns its path and state.
     def self.restore(id, ticket:, destination:, context: nil, database: nil)
-      raise Error, "restore needs exactly one of context (Temper) or database (SQLite)" unless context.nil? ^ database.nil?
+      raise Error, "restore takes either --context REF or --database PATH, not both" if context && database
+      raise Error, "restore needs --context REF or --database PATH" unless context || database
       raise Error, "invalid run ID" unless id.match?(PrGraph::EventLog::UUID)
       destination = File.expand_path(destination)
       raise Error, "restore destination must be empty" if File.exist?(destination) && Dir.children(destination).any?

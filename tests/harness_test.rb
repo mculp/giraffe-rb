@@ -36,7 +36,15 @@ class HarnessTest < Minitest::Test
     end
   end
 
+  # The tests that build their own sandbox, or bind a port, can't run inside one.
+  NEEDS_NO_SANDBOX = %w[
+    test_the_line_that_ran_off_a_phone_at_695756d_cannot_reach_a_draft
+    test_a_screen_check_gets_the_network_and_little_of_the_home_directory
+    test_no_check_can_reach_the_keychain
+  ].freeze
+
   def setup
+    skip "already inside a sandbox, which can't nest" if NEEDS_NO_SANDBOX.include?(name) && inside_a_sandbox?
     @tmp = Dir.mktmpdir("giraffe-harness-test-")
     @repo = File.join(@tmp, "app")
     @git = Giraffe::Git.new
@@ -64,10 +72,6 @@ class HarnessTest < Minitest::Test
   def inside_a_sandbox?
     return false unless File.executable?("/usr/bin/sandbox-exec")
     !system("/usr/bin/sandbox-exec", "-p", "(version 1)(allow default)", "/usr/bin/true", out: File::NULL, err: File::NULL)
-  end
-
-  def skip_inside_a_sandbox
-    skip "already inside a sandbox, which can't nest" if inside_a_sandbox?
   end
 
   def teardown
@@ -1126,7 +1130,6 @@ class HarnessTest < Minitest::Test
   # passed it. A person found it in a screenshot, and its fix, 81d2a72, measures what this fixture does.
   def test_the_line_that_ran_off_a_phone_at_695756d_cannot_reach_a_draft
     skip "no Chrome here to draw with" unless ScreenFit.chrome
-    skip_inside_a_sandbox
     fixture = ->(name) { File.read(File.join(ROOT, "tests/fixtures/screens", name), encoding: "UTF-8") }
     data = script
     data["build"][0]["writes"].merge!("hud.html" => fixture["hud_695756d.html"], "fit_check.rb" => fixture["fit_check.rb"])
@@ -1260,7 +1263,6 @@ class HarnessTest < Minitest::Test
   # With the network open, what a screen check can read can leave.
   def test_a_screen_check_gets_the_network_and_little_of_the_home_directory
     skip "the sandbox is macOS only" unless RbConfig::CONFIG["host_os"].include?("darwin")
-    skip_inside_a_sandbox
     home = File.join(File.realpath(@tmp), "home")
     FileUtils.mkdir_p(%w[.ssh tool/bin tool/lib].map { |path| File.join(home, path) })
     {".ssh/id" => "private", "notes.txt" => "private", "tool/lib/runtime" => "a tool's own file", "tool/credentials.toml" => "private", ".gitconfig" => "[user]\n"}.each { |path, text| File.write(File.join(home, path), text) }
@@ -1296,7 +1298,6 @@ class HarnessTest < Minitest::Test
   # no such item. A search the services refuse says it was not valid, and one they answer only that nothing was found.
   def test_no_check_can_reach_the_keychain
     skip "the sandbox is macOS only" unless RbConfig::CONFIG["host_os"].include?("darwin")
-    skip_inside_a_sandbox
     asks = ["/usr/bin/security", "find-generic-password", "-s", "giraffe-test-no-such-item"]
     checks = Giraffe::Checks.new(config(sandbox_checks: true), command: @command)
     refute_match(/not valid/, @command.capture(asks, cwd: @repo)["stderr"], "outside the sandbox the keychain answers")
