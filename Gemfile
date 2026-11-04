@@ -2,7 +2,8 @@
 
 source "https://rubygems.org"
 
-# Development tools only: bin/giraffe and bin/test need no gems.
+# Development tools only. Giraffe itself loads nothing from here; the SQLite backend's sqlite3 gem is installed on
+# its own (docs/running.md).
 group :development do
   # The ratchet on Sandi Metz's rules. Not on RubyGems yet, so it comes from git at a full commit id.
   gem "sandi", git: "https://github.com/mculp/sandi", ref: "c6f3250896a93db1517de9cda6a00ba5efabfd8d"
