@@ -49,8 +49,9 @@ class ModelRunnerTest < Minitest::Test
 
   def test_a_request_becomes_what_a_runner_is_asked_in_these_fields_and_this_order
     request = asked("review", writable: false).for_runner("the prompt", 1.5).to_h
-    assert_equal({step: "review", prompt: "the prompt", schema: role_schema("review"), cwd: @tmp, writable: false, budget_usd: 1.5}, request)
-    assert_equal %i[step prompt schema cwd writable budget_usd], request.keys
+    assert_equal({step: "review", prompt: "the prompt", schema: role_schema("review"), cwd: @tmp, writable: false, budget_usd: 1.5,
+                  profile: Giraffe::Runners::ToolProfile::NONE}, request)
+    assert_equal %i[step prompt schema cwd writable budget_usd profile], request.keys
     assert_equal true, asked("build", writable: true).for_runner("p", 2).to_h[:writable]
   end
 

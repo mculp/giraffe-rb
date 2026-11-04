@@ -3,6 +3,7 @@
 require "json"
 require "fileutils"
 require_relative "../errors"
+require_relative "tool_profile"
 
 module Giraffe
   module Runners
@@ -17,7 +18,7 @@ module Giraffe
 
       # A call is kept, and shown to an entry that answers for it, as the hash that tests read its fields from.
       def call(task)
-        @calls << (request = task.to_h)
+        @calls << (request = recorded(task))
         role = request.fetch(:step)
         index = @positions.fetch(role, 0)
         entry = @script.fetch(role) { raise Error, "no scripted step #{role}" }[index]
@@ -38,6 +39,11 @@ module Giraffe
         end
         {"output" => entry.fetch("output"), "usage" => {"cost_usd" => entry.fetch("cost_usd", 0.0), "turns" => 1}}
       end
+
+      private
+
+      # A task that uses nothing more than reading or editing is kept as the six fields it always had.
+      def recorded(task) = task.profile == ToolProfile::NONE ? task.to_h.except(:profile) : task.to_h
     end
   end
 end
