@@ -16,11 +16,23 @@ and cloud/program automation remain separate follow-up stages. A draft PR does n
 - [Run it](docs/running.md): configuration, commands, storage, and current limits
 - [Live graph API](docs/graph-api.md): snapshots/events for a future frontend and editing boundary
 
+## Install
+
+Giraffe is the `giraffe-rb` gem, because `giraffe` on RubyGems is another project. Everything
+inside is `Giraffe`, and the command is `giraffe`. It isn't published yet, so install it from git:
+
+```ruby
+gem "giraffe-rb", git: "https://github.com/mculp/giraffe-rb"
+```
+
+`require "giraffe"` and `require "giraffe/rb"` both load it. It needs Ruby 3.4 and no other gems;
+the SQLite backend also needs `sqlite3` ([docs/running.md](docs/running.md)).
+
 ## Layout
 
 | Path | Holds |
 | --- | --- |
-| `bin/giraffe`, `lib/giraffe/` | Controller, harness, runners, local store, live Temper sync, and graph read model |
+| `bin/giraffe`, `lib/giraffe/`, `giraffe-rb.gemspec` | Controller, harness, runners, local store, live Temper sync, and graph read model |
 | `prompts/`, `schemas/` | Fresh-context role instructions and validated model outputs |
 | `scripts/` | The coordinator, contract, CI, feedback, seed, metrics, run record, and Temper scripts |
 | `references/` | The v1 contracts, the coordinator policy, the automated feedback authors, and their docs |
