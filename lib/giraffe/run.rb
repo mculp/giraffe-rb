@@ -38,8 +38,10 @@ module Giraffe
 
     # Installs a run's last fully synced checkpoint under `destination`, read from `home` (a Backends::Home).
     # Returns its path and state.
-    def self.restore(id, home:, ticket:, destination:)
+    # `where` is the restore's flags, {context:} or {database:}, which name the backend it reads from.
+    def self.restore(id, where:, ticket:, destination:)
       raise Error, "invalid run ID" unless id.match?(PrGraph::EventLog::UUID)
+      home = Backends::Home.from(**where)
       destination = File.expand_path(destination)
       raise Error, "restore destination must be empty" if File.exist?(destination) && Dir.children(destination).any?
       remote = PrGraph::Store.new(backend: Backends.reader(home.settings, run_id: id, ticket: ticket), run_id: id)

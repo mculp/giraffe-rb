@@ -58,8 +58,7 @@ begin
            when "restore"
              id = ARGV.shift || raise(Giraffe::Error, "run ID is required")
              %i[ticket destination].each { |key| raise Giraffe::Error, "--#{key} is required" unless options[key] }
-             home = Giraffe::Backends::Home.from(**options.slice(:context, :database))
-             path, state = Giraffe::Run.restore(id, home: home, **options.slice(:ticket, :destination))
+             path, state = Giraffe::Run.restore(id, where: options.slice(:context, :database), **options.slice(:ticket, :destination))
              {"path" => path, "status" => "restored", "revision" => state["revision"], "note" => "Repository and worktree paths must still exist; cross-host relocation is not implemented."}
            else
              puts parser
