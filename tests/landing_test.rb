@@ -30,6 +30,9 @@ class LandingTest < Minitest::Test
     path = File.join(@tmp, name)
     sh(@tmp, "git", "clone", "-q", @origin, path)
     sh(path, "git", "checkout", "-q", "-B", "main")
+    # A real checkout has an identity; a CI runner has none to inherit, and a rebase writes commits.
+    sh(path, "git", "config", "user.name", "t")
+    sh(path, "git", "config", "user.email", "t@t")
     path
   end
 

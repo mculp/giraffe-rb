@@ -27,13 +27,14 @@ module Giraffe
       push(repo, sha, branch, base)
     end
 
-    # The commits since base, replayed on the branch's newest head. A conflict leaves the tree as it was and raises.
+    # The commits since base, replayed on the branch's newest head. A conflict, or any other failure, leaves the tree as
+    # it was and raises.
     def rebase(repo, branch: "main")
       onto = fetch(repo, branch)
       result = git(repo, "-c", "core.hooksPath=/dev/null", "rebase", onto)
       return git!(repo, "rev-parse", "HEAD") if result["status"].zero?
       git(repo, "rebase", "--abort")
-      raise Error, "rebase onto #{@remote}/#{branch} conflicts: #{Command.tail(result['stdout'] + result['stderr'])}"
+      raise Error, "rebase onto #{@remote}/#{branch} failed: #{Command.tail(result['stdout'] + result['stderr'])}"
     end
 
     private
