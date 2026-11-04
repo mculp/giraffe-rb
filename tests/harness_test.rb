@@ -148,6 +148,56 @@ class HarnessTest < Minitest::Test
     assert_includes calls.last[:prompt], "Use fixed"
   end
 
+  # Puts the class in as a node's step for the block, whatever was there.
+  def with_step(name, step)
+    original = Giraffe::Steps.send(:remove_const, name) if Giraffe::Steps.const_defined?(name, false)
+    Giraffe::Steps.const_set(name, step)
+    yield
+  ensure
+    Giraffe::Steps.send(:remove_const, name)
+    Giraffe::Steps.const_set(name, original) if original
+  end
+
+  def test_a_step_object_does_its_node_through_its_context_and_the_other_steps_carry_on
+    brief = triage.merge("ticket" => ticket)
+    context = nil
+    step = Class.new do
+      define_method(:call) do |given|
+        context = given
+        given.put("triage_brief", brief)
+        given.checkpoint("probe", "seen")
+        given.finish
+      end
+    end
+    run = start
+    checks = Giraffe::Checks.new(run.config, command: @command)
+    with_step(:Triage, step) { execute(run, script.except("triage"), checks: checks) }
+    assert_equal "draft_pr", run.state["status"]
+    assert_equal "TRIAGE", context.node
+    assert_equal run.coordinator.snapshot["attempts"].find { |_id, row| row["node"] == "TRIAGE" }.first, context.attempt
+    assert_same run, context.run
+    assert_same checks, context.checks
+    assert_same @github, context.github
+    assert_equal "seen", run.state.dig("runtime", "probe")
+    refute @runner.calls.any? { |call| call[:step] == "triage" }, "the mixin method ran as well"
+  end
+
+  def test_a_run_gets_the_runner_its_configuration_names
+    assert_instance_of Giraffe::Runners::Claude, Giraffe::Runners.for(start(runner: "claude"), command: @command)
+    assert_instance_of Giraffe::Runners::Scripted, Giraffe::Runners.for(start(runner: "scripted"), command: @command)
+  end
+
+  def test_a_context_puts_what_its_attempt_already_put_once_and_refuses_different_evidence
+    run = start
+    services = Giraffe::Services.new(git: @git, checks: nil, github: @github, model: nil)
+    context = Giraffe::StepContext.new(run, services, "TRIAGE", run.coordinator.start("TRIAGE").fetch("attempt_id"))
+    brief = triage.merge("ticket" => ticket)
+    2.times { context.put("triage_brief", brief) }
+    assert_equal 1, run.coordinator.snapshot["artifacts"].count { |row| row["family"] == "triage_brief" }
+    error = assert_raises(Giraffe::Error) { context.put("triage_brief", brief.merge("summary" => "changed")) }
+    assert_equal "recovery would replace triage_brief with different evidence", error.message
+  end
+
   def test_dirty_source_fails_before_any_model
     File.write(File.join(@repo, "unrelated.txt"), "private work")
     run = start
