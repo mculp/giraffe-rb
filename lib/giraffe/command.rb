@@ -1,8 +1,8 @@
 # frozen_string_literal: true
 
-require "open3"
-require_relative "../../scripts/process_group"
 require_relative "errors"
+require_relative "command/invocation"
+require_relative "command/execution"
 
 module Giraffe
   # Argument arrays only; shell commands for project checks are explicit, sandboxed inputs.
@@ -26,53 +26,8 @@ module Giraffe
     end
 
     def capture(argv, cwd:, env: {}, timeout: 600, input: nil, clean_env: false, limit: LIMIT)
-      raise Error, "command must be a nonempty argument array" unless argv.is_a?(Array) && argv.any? && argv.all? { |part| part.is_a?(String) }
-      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      output = error = status = nil
-      Open3.popen3(env, *argv, chdir: cwd, pgroup: true, unsetenv_others: clean_env) do |stdin, stdout, stderr, waiter|
-        readers = [stdout, stderr].map do |stream|
-          Thread.new do
-            Thread.current.report_on_exception = false
-            data = +""
-            while (chunk = stream.read(16_384))
-              data << chunk
-              if data.bytesize > limit
-                raise CommandLimit, "#{argv.first(2).join(' ')} output exceeds #{limit} bytes"
-              end
-            end
-            data
-          end
-        end
-        writer = Thread.new do
-          Thread.current.report_on_exception = false
-          begin
-            stdin.write(input) if input
-          rescue Errno::EPIPE
-            nil
-          ensure
-            stdin.close unless stdin.closed?
-          end
-        end
-        begin
-          loop do
-            raise Cancelled, "run cancelled" if @cancelled.call
-            raise CommandLimit, "#{argv.first(2).join(' ')} timed out after #{timeout}s" if Process.clock_gettime(Process::CLOCK_MONOTONIC) - started > timeout
-            readers.each { |thread| thread.value unless thread.alive? }
-            pending = [waiter, *readers, writer].find(&:alive?)
-            break unless pending
-            pending.join(0.025)
-          end
-          writer.value
-          output, error = readers.map(&:value)
-          status = waiter.value.exitstatus || 128 + waiter.value.termsig.to_i
-        ensure
-          PrGraph::ProcessGroup.terminate(waiter.pid)
-          stdin.close unless stdin.closed?
-          writer.join(1)
-          readers.each { |thread| thread.join(1) }
-        end
-      end
-      {"status" => status, "stdout" => output.force_encoding("UTF-8").scrub, "stderr" => error.force_encoding("UTF-8").scrub}
+      invocation = Invocation.new(argv: argv, cwd: cwd, env: env, timeout: timeout, input: input, clean_env: clean_env, limit: limit)
+      Execution.new(invocation, @cancelled).call
     end
 
     def run!(argv, **options)
