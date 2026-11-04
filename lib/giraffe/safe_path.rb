@@ -38,8 +38,9 @@ module Giraffe
       path
     end
 
-    # A leading dash is an option to whatever command is handed the path.
-    def unusable?(relative) = relative.start_with?("/", "-") || relative.split("/").intersect?(OFF_LIMITS)
+    # A leading dash is an option to whatever command is handed the path. Case is ignored because the default macOS
+    # volume treats ".GIT" as ".git".
+    def unusable?(relative) = relative.start_with?("/", "-") || relative.split("/").map(&:downcase).intersect?(OFF_LIMITS)
 
     def regular_file?(path) = File.file?(path) && !File.symlink?(path) && inside?(File.realpath(path))
 

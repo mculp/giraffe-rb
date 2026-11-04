@@ -6,6 +6,7 @@ require "fileutils"
 require "rbconfig"
 require "socket"
 require "etc"
+require "open3"
 require_relative "../lib/giraffe/harness"
 require_relative "../lib/giraffe/graph_view"
 require_relative "fixtures/screens/fit_check"
@@ -36,7 +37,23 @@ class HarnessTest < Minitest::Test
     end
   end
 
+  # Sandboxes don't nest: inside one, applying another fails, and so do the tests that need the real thing. Where
+  # there is no sandbox-exec at all, nothing is skipped here.
+  def skip_inside_a_sandbox
+    _out, status = Open3.capture2e("sandbox-exec", "-p", "(version 1)(allow default)", "/usr/bin/true")
+    skip "already inside a sandbox, which cannot be nested" unless status.success?
+  rescue Errno::ENOENT
+    nil
+  end
+
+  NEEDS_A_SANDBOX_OF_THEIR_OWN = %w[
+    test_the_line_that_ran_off_a_phone_at_695756d_cannot_reach_a_draft
+    test_a_screen_check_gets_the_network_and_little_of_the_home_directory
+    test_no_check_can_reach_the_keychain
+  ].freeze
+
   def setup
+    skip_inside_a_sandbox if NEEDS_A_SANDBOX_OF_THEIR_OWN.include?(name)
     @tmp = Dir.mktmpdir("giraffe-harness-test-")
     @repo = File.join(@tmp, "app")
     @git = Giraffe::Git.new
@@ -60,6 +77,8 @@ class HarnessTest < Minitest::Test
   end
 
   def teardown
+    return unless @tmp # setup skipped before it made anything
+
     ENV.replace(@old_env)
     FileUtils.remove_entry(@tmp)
   end
@@ -1400,7 +1419,8 @@ class HarnessTest < Minitest::Test
   end
 
   def test_build_cannot_edit_the_hooks_a_checkout_will_run
-    {".githooks/post-checkout" => ".githooks/", "hooks/post-checkout" => "./hooks", ".husky/post-checkout" => nil}.each do |path, configured|
+    {".githooks/post-checkout" => ".githooks/", "hooks/post-checkout" => "./hooks", ".husky/post-checkout" => nil,
+     "post-checkout" => "./"}.each do |path, configured|
       FileUtils.mkdir_p(File.join(@repo, File.dirname(path)))
       File.write(File.join(@repo, path), "#!/bin/sh\nexit 0\n")
       commit_base("hooks in the tree")
