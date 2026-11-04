@@ -27,12 +27,18 @@ module Giraffe
 
       # Input travels over stdin, never in process arguments.
       def capture(task)
-        @command.capture(ClaudeArgv.new(@config, task).to_a, cwd: task.cwd, env: environment, clean_env: true, input: task.prompt,
+        @command.capture(ClaudeArgv.new(@config, task).to_a, cwd: task.cwd, env: environment(task.profile), clean_env: true, input: task.prompt,
                          timeout: @config["call_timeout"])
       end
 
-      # Only model authentication is inherited.
-      def environment = ENV.slice(*Command::BASE_ENV, "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN").merge("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" => "1")
+      # Only model authentication is inherited. A call that may run commands has them run with that authentication
+      # scrubbed, so project code never holds it; its subagents run on the profile's model.
+      def environment(profile)
+        env = ENV.slice(*Command::BASE_ENV, "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN").merge("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" => "1")
+        env["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] = "1" if profile.shell?
+        env["CLAUDE_CODE_SUBAGENT_MODEL"] = profile.subagents if profile.subagents?
+        env
+      end
 
       # What claude printed: its answer and what it cost, or why it is not an answer.
       def read(step, result)
