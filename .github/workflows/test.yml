@@ -16,7 +16,7 @@ jobs:
       - uses: ruby/setup-ruby@651ff0d62c5c79bed6d53ec518387aae20e72c1a # v1.329.0
         with:
           ruby-version: "3.4"
+          # Installs the Gemfile's development tools (sandi and the RuboCop its baseline was counted with).
+          bundler-cache: true
       - run: bin/test
-      # Pinned because the baseline's counts are this version's. bin/test needs no gems, so only this step installs one.
-      - run: gem install rubocop -v 1.87.0 --no-document
-      - run: bin/sandi
+      - run: bundle exec sandi

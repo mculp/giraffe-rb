@@ -24,7 +24,6 @@ and cloud/program automation remain separate follow-up stages. A draft PR does n
 | `prompts/`, `schemas/` | Fresh-context role instructions and validated model outputs |
 | `scripts/` | The coordinator, contract, CI, feedback, seed, metrics, run record, and Temper scripts |
 | `references/` | The v1 contracts, the coordinator policy, the automated feedback authors, and their docs |
-| `bin/sandi`, `lib/sandi/` | The design-limit ratchet below, a development tool outside the harness |
 | `tests/` | A shell test per script |
 | `evals/` | The graph eval suite with its fixtures and fake Temper, and the build suite in `evals/build/` |
 | `docs/` | The harness design, run records, Temper grounding, and knowledge tiers |
@@ -52,15 +51,16 @@ permissions require live probes.
 
 ## Design limits
 
-`bin/sandi` holds the Ruby to Sandi Metz's rules: at most 100 lines to a class, 5 to a method, 4
-parameters, and one constant that an entry point calls methods on. The code does not meet them yet,
-so `.sandi-baseline.json` records each file's count and `bin/sandi` exits 1 when a count rises or a
-file the baseline lacks has an offense. Its first line is the progress to quote in a PR, and it
-names the files that improved. RuboCop does the counting, so install it with
-`gem install rubocop -v 1.87.0 --no-document`; `bin/test` does not need it, so CI runs `bin/sandi`
-as its own step. A PR does not have to touch the baseline, which keeps parallel PRs from
-conflicting. Tighten it after merges with `bin/sandi --update`, which refuses to raise a count
-without `--allow-increase`.
+The [sandi](https://github.com/mculp/sandi) gem holds the Ruby to Sandi Metz's rules: at most 100
+lines to a class, 5 to a method, 4 parameters, and one constant that an entry point calls methods on.
+The code does not meet them yet, so `.sandi-baseline.json` records each file's count and
+`bundle exec sandi` exits 1 when a count rises or a file the baseline lacks has an offense. Its
+first line is the progress to quote in a PR, and it names the files that improved. The `Gemfile`
+pins sandi to a commit and RuboCop to the version the baseline was counted with, so run
+`bundle install` first; `bin/test` does not need either, so CI runs `bundle exec sandi` as its own
+step. A PR does not have to touch the baseline, which keeps parallel PRs from conflicting. Tighten
+it after merges with `bundle exec sandi --update`, which refuses to raise a count without
+`--allow-increase`.
 
 ## Credentials
 
