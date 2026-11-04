@@ -93,6 +93,12 @@ class HarnessTest < Minitest::Test
      "pr_body" => [{"questions" => [], "title" => "Show requested greeting", "body" => "## Description\nChanges greeting.\n\n## Notes\nExecutable checks passed."}]}
   end
 
+  # The run's copy in Temper, read the way a restore reads it.
+  def remote_of(run)
+    backend = Giraffe::Backends.reader({"context" => "+test/runs"}, run_id: run.id, ticket: ticket["id"])
+    PrGraph::Store.new(backend: backend, run_id: run.id)
+  end
+
   def start(**overrides) = Giraffe::Run.start(config(**overrides), ticket)
   def execute(run, data = script, **kwargs)
     @runner = data.is_a?(Giraffe::Runners::Scripted) ? data : Giraffe::Runners::Scripted.new(data)
@@ -113,7 +119,7 @@ class HarnessTest < Minitest::Test
     refute reader[:writable]
     execute(Giraffe::Run.load(run.path), {})
     assert_equal 1, @github.calls.length
-    remote = PrGraph::Store.new(context: "+test/runs", run_id: run.id, ticket: ticket["id"])
+    remote = remote_of(run)
     target = File.join(@tmp, "restored/run.jsonl")
     remote.hydrate(target)
     restored = PrGraph::Coordinator.new(execution_path: target, run_id: run.id, session: run.state["session"]).snapshot
@@ -189,6 +195,49 @@ class HarnessTest < Minitest::Test
     assert_match(/screen_checks/, assert_raises(Giraffe::Error) { config(screen_checks: "npm run horde") }.message)
   end
 
+  def test_backends_build_temper_for_a_mirror_and_a_reader_from_a_configuration_that_names_it_or_none
+    [:mirror, :reader].each do |role|
+      [{}, {"backend" => "temper"}].each do |named|
+        backend = Giraffe::Backends.public_send(role, named.merge("context" => "+test/runs"), run_id: SecureRandom.uuid, ticket: ticket["id"])
+        assert_instance_of Giraffe::Backends::Temper, backend
+        assert_equal "+test/runs", backend.to_s
+        refute backend.holds_run?
+        backend.open!
+        assert backend.holds_run?
+      end
+      error = assert_raises(Giraffe::Error) { Giraffe::Backends.public_send(role, {"backend" => "sqlite"}, run_id: SecureRandom.uuid, ticket: ticket["id"]) }
+      assert_match(/unknown backend sqlite/, error.message)
+    end
+  end
+
+  def test_a_mirror_never_waits_on_a_retry_but_a_reader_does
+    ENV["FAKE_TEMPER_FAIL"] = "resource list"
+    waited = {}
+    [:mirror, :reader].each do |role|
+      backend = Giraffe::Backends.public_send(role, {"context" => "+test/runs"}, run_id: SecureRandom.uuid, ticket: ticket["id"])
+      waited[role] = []
+      backend.define_singleton_method(:sleep) { |seconds| waited[role] << seconds }
+      assert_raises(PrGraph::Store::Error) { backend.holds_run? }
+    end
+    assert_empty waited[:mirror]
+    refute_empty waited[:reader]
+  end
+
+  def test_backend_defaults_to_temper_and_nothing_else_is_accepted
+    assert_equal "temper", config["backend"]
+    assert_match(/backend must be temper/, assert_raises(Giraffe::Error) { config(backend: "sqlite") }.message)
+    assert_match(/backend must be temper/, assert_raises(Giraffe::Error) { config(backend: nil) }.message)
+  end
+
+  def test_run_started_without_a_backend_still_loads_and_mirrors_to_temper
+    older = Giraffe::Config.new(config(store: "mirrored").data.except("backend"))
+    run = Giraffe::Run.start(older, ticket)
+    refute run.state["config"].key?("backend")
+    assert Giraffe::Run.load(run.path).sync["synced"]
+    held = JSON.parse(File.read(ENV["FAKE_TEMPER_CONTEXT"]))["rows"].map { |row| row.dig("open_meta", "giraffe_run_id") }
+    assert_equal [run.id], held
+  end
+
   def test_verifier_that_changes_tracked_file_cannot_publish
     checks = Object.new
     calls = 0
@@ -217,7 +266,7 @@ class HarnessTest < Minitest::Test
 
   def test_live_temper_updates_before_step_completion
     run = start(store: "mirrored")
-    remote = PrGraph::Store.new(context: "+test/runs", run_id: run.id, ticket: ticket["id"])
+    remote = remote_of(run)
     events = remote.read_records(PrGraph::Shapes::EVENT_LOG).flat_map { |row| row["events"] }
     assert_equal "run_start", events.first["e"]
     run.coordinator.start("TRIAGE")
@@ -235,7 +284,7 @@ class HarnessTest < Minitest::Test
     ENV.delete("FAKE_TEMPER_FAIL")
     assert run.sync["synced"]
     assert run.sync["synced"]
-    remote = PrGraph::Store.new(context: "+test/runs", run_id: run.id, ticket: ticket["id"])
+    remote = remote_of(run)
     assert_equal 1, remote.read_records(PrGraph::Shapes::EVENT_LOG).length
     assert_equal 1, remote.read_records(PrGraph::Shapes::HARNESS).length
   end
@@ -251,7 +300,7 @@ class HarnessTest < Minitest::Test
     run = start(store: "mirrored")
     assert run.sync["synced"]
     run.coordinator.start("TRIAGE")
-    remote = PrGraph::Store.new(context: "+test/runs", run_id: run.id, ticket: ticket["id"])
+    remote = remote_of(run)
     target = File.join(@tmp, "restored/run.jsonl")
     remote.hydrate(target)
     events = PrGraph::EventLog.new.read(target)
@@ -993,7 +1042,7 @@ class HarnessTest < Minitest::Test
       result
     end
     id = SecureRandom.uuid
-    PrGraph::Store.new(context: "+test/runs", run_id: id, ticket: ticket["id"], cli: cli, versioned: true).open!
+    Giraffe::Backends::Temper.new(context: "+test/runs", run_id: id, ticket: ticket["id"], cli: cli, versioned: true).open!
     rows = JSON.parse(File.read(ENV["FAKE_TEMPER_CONTEXT"]))["rows"]
     assert_equal 1, rows.count { |row| row.dig("open_meta", "giraffe_run_id") == id }
   end

@@ -4,32 +4,38 @@ require "fileutils"
 require "json"
 require "securerandom"
 require "set"
-require "tempfile"
 require_relative "../../scripts/artifact_log"
 require_relative "../../scripts/content_scan"
 require_relative "../../scripts/coordinator_runtime"
 require_relative "../../scripts/event_log"
 require_relative "../../scripts/failure_log"
-require_relative "../../scripts/temper_cli"
 require_relative "shapes"
 
 module PrGraph
-  # Stores a run in a Temper context as it happens, so another machine can resume it (docs/harness.md).
+  # Stores a run as it happens, so another machine can resume it (docs/harness.md).
   #
-  # A run is one research resource. Each write the harness makes is a data artifact on it, under a kind
-  # whose enforcing shape is the log's contract (shapes.rb):
+  # Each write the harness makes is a record under a kind whose enforcing shape is the log's contract
+  # (shapes.rb):
   #
   #   giraffe-run-event-log, -artifact-log, -failure-log   one transition: {transition_id, events}
   #   giraffe-run-<family>                                 an artifact's evidence: {record, content}
   #   giraffe-run-manifest                                 a coordinator lease or result: {name, text}
   #
+  # The records live in a backend (Giraffe::Backends), which answers these and raises Error when it cannot:
+  #
+  #   open!                                                make the run's home and declare its kinds; idempotent
+  #   commit(kind:, content:, precedence:, correlation:)   keep one content under a kind and return its ID
+  #   contents(kind)                                       what a kind holds, in stored order
+  #   holds_run?                                           whether the run's home exists
+  #
+  # Its `to_s` says where the records live, for messages.
+  #
   # The stored logs below write through the store before they append locally, so a write the store
-  # refuses never lands locally. There is no offline mode: a write the store does not take after its
-  # retries raises. A write carrying a secret or over 1 MB raises before any Temper call.
+  # refuses never lands locally. There is no offline mode: a write the backend does not take raises. A write
+  # carrying a secret or over 1 MB raises before any backend call.
   class Store
     class Error < StandardError; end
 
-    TAG = "giraffe-live-run"
     UUID = Shapes::PATTERNS.fetch("uuid").delete_prefix("^").delete_suffix("$")
     ARTIFACT_ID = /\A#{UUID}\z/
     MANIFEST_NAME = /\A(?<attempt>#{UUID})\.[a-z_]+\.json\z/i
@@ -38,53 +44,35 @@ module PrGraph
     FAILURE_LOG = Shapes::FAILURE_LOG
     MANIFEST = Shapes::MANIFEST
 
-    attr_reader :context, :run_id
+    attr_reader :run_id
 
-    def initialize(context:, run_id:, ticket:, cli: TemperCli.new, backoff: [1, 5, 25], versioned: false)
-      @context = context
+    def initialize(backend:, run_id:)
+      @backend = backend
       @run_id = run_id
-      @ticket = ticket
-      @cli = cli
-      @backoff = backoff
       @in_step = Set.new
-      @versioned = versioned
     end
 
-    # Finds or creates the run's resource and makes every kind enforcing under the shape the contracts
-    # build now, declaring a kind again when Temper holds a different one. Idempotent.
     def open!
-      @resource = find_resource || create_resource
-      declared = temper("data-artifact", "schema", "list", "--context", context).to_h { |shape| [shape["kind"], shape] }
-      shapes.each do |kind, schema|
-        physical = physical_kind(kind)
-        next if declared_current?(declared[physical], schema)
-
-        with_file(JSON.generate(schema)) do |path|
-          temper("data-artifact", "schema", "declare", context, "--kind", physical, "--enforcement", "enforcing", "--content", "@#{path}")
-        end
-      end
+      @backend.open!
       self
     end
 
-    # Writes one data artifact and returns its ID. Raises Error before any Temper call when the content
-    # carries a secret or is over 1 MB, and after the last retry when the store will not take it.
+    # Writes one record and returns its ID. Raises Error before any backend call when the content carries a
+    # secret or is over 1 MB, and when the backend will not take it.
     def commit(kind:, content:, precedence:, correlation:)
       json = JSON.generate(content)
       if (reason = ContentScan.violation(content, json))
         raise Error, "#{kind} was not stored: #{reason}"
       end
 
-      with_file(json) do |path|
-        temper("data-artifact", "commit", resource, "--kind", physical_kind(kind), "--intent", "member", "--precedence", precedence.to_s,
-               "--content", "@#{path}", "--correlation", correlation).fetch("artifact_id")
-      end
+      @backend.commit(kind: kind, content: content, precedence: precedence, correlation: correlation)
     end
 
     # One append to the log at `path`: a check that every artifact its findings and links name has evidence
-    # in Temper, the evidence its own artifact events name, then the events as one transition, then the
+    # in the backend, the evidence its own artifact events name, then the events as one transition, then the
     # local append the block makes. A process checks the first time it appends to a log, and again after
-    # a local append failed, that Temper holds nothing at or past the log's next sequence number. A crash
-    # between Temper taking a transition and the local log taking it leaves the local log behind, and
+    # a local append failed, that the backend holds nothing at or past the log's next sequence number. A crash
+    # between the backend taking a transition and the local log taking it leaves the local log behind, and
     # appending would give that sequence number to a different transition.
     def append(kind, path, events, evidence: {})
       key = [kind, path]
@@ -114,8 +102,8 @@ module PrGraph
     end
 
     def read_records(kind)
-      raise Error, "#{context} holds no run #{run_id}" unless resource
-      contents(kind)
+      raise Error, "#{@backend} holds no run #{run_id}" unless @backend.holds_run?
+      @backend.contents(kind)
     end
 
     # The run's last fully synced harness state, if it has one.
@@ -153,7 +141,7 @@ module PrGraph
 
       checkpoint = latest_checkpoint&.dig("runtime", "sync_checkpoint")
       events = synced_rows(EVENT_LOG, checkpoint)
-      raise Error, "#{context} holds no #{EVENT_LOG} for run #{run_id}" if events.empty?
+      raise Error, "#{@backend} holds no #{EVENT_LOG} for run #{run_id}" if events.empty?
 
       artifact_events = synced_rows(ARTIFACT_LOG, checkpoint)
       failures = synced_rows(FAILURE_LOG, checkpoint)
@@ -192,24 +180,6 @@ module PrGraph
 
     private
 
-    def resource
-      @resource ||= find_resource
-    end
-
-    def shapes
-      @shapes ||= Shapes.build
-    end
-
-    def versioned_kinds
-      shapes.to_h { |kind, schema| [kind, "#{kind}-#{Digest::SHA256.hexdigest(JSON.generate(schema))[0, 16]}"] }
-    end
-
-    # Finding the resource is what loads the run's kind map, so it comes first.
-    def physical_kind(kind)
-      resource
-      @kind_map ? @kind_map.fetch(kind) : kind
-    end
-
     # One transition of a log: every event one append added, written as one unit.
     def commit_transition(kind, events)
       commit(kind: kind, content: {"transition_id" => SecureRandom.uuid, "events" => events}, precedence: events.first.fetch("seq"),
@@ -238,49 +208,16 @@ module PrGraph
     # Each stored artifact's content by its ID.
     def evidence
       Shapes.family_kinds.each_with_object({}) do |kind, held|
-        contents(kind).each { |content| held[content.dig("record", "artifact_id")] = content.fetch("content") }
+        @backend.contents(kind).each { |content| held[content.dig("record", "artifact_id")] = content.fetch("content") }
       end
     end
 
     def ensure_not_behind!(kind, path, next_seq)
-      held = contents(kind).flat_map { |content| content.fetch("events") }.map { |event| event.fetch("seq") }.max
+      held = @backend.contents(kind).flat_map { |content| content.fetch("events") }.map { |event| event.fetch("seq") }.max
       return if held.nil? || held < next_seq
 
       raise Error, "#{path} is behind Temper: #{kind} holds sequence #{held} and the next local sequence is #{next_seq}. " \
                    "Hydrate the run from Temper into a new path instead of appending here"
-    end
-
-    # A versioned kind's name already carries its schema's digest, so only an unversioned one needs reading back.
-    def declared_current?(shape, schema)
-      return false unless shape && shape["enforcement"] == "enforcing"
-
-      @kind_map || temper("data-artifact", "schema", "show", shape.fetch("shape_id")).dig("schema", "title") == schema["title"]
-    end
-
-    def find_resource
-      rows = temper("resource", "list", "--context", context, "--type", "research", "--title-contains", run_id,
-                    "--all", "--with", "open-meta").fetch("rows")
-      matches = rows.select { |row| row.dig("open_meta", "giraffe_run_id") == run_id }
-      raise Error, "multiple live resources claim run #{run_id}; reconcile them before writing" if matches.length > 1
-      return nil if matches.empty?
-      @kind_map = matches.first.dig("open_meta", "giraffe_kind_map")
-      if @kind_map && @kind_map != versioned_kinds
-        raise Error, "run uses different contracts; resume it with its pinned Giraffe release"
-      end
-      matches.first.fetch("id")
-    end
-
-    def create_resource
-      @kind_map = versioned_kinds if @versioned
-      meta = JSON.generate({"tags" => [TAG], "giraffe_run_id" => run_id, "ticket" => @ticket, "giraffe_kind_map" => @kind_map}.compact)
-      body = "# giraffe live run #{@ticket} #{run_id}\n\nThis run is in progress. Its event, artifact, and failure logs, its " \
-             "coordinator manifests, and its artifacts are stored here as data artifacts as the harness writes them.\n"
-      with_file(body) do |path|
-        @cli.call("resource", "create", "--type", "research", "--context", context, "--title", "giraffe live run #{@ticket} #{run_id}",
-               "--open-meta", meta, "--body", "@#{path}").fetch("id")
-      end
-    rescue TemperCli::Error => error
-      find_resource || raise(Error, "resource creation was not confirmed: #{error.message}; retry sync to reconcile")
     end
 
     # The first attempt an event belongs to, which every write of that attempt is correlated under.
@@ -292,38 +229,11 @@ module PrGraph
       nil
     end
 
-    def temper(*args)
-      attempts = 1
-      begin
-        @cli.call(*args)
-      rescue TemperCli::Error => e
-        delay = @backoff[attempts - 1]
-        raise Error, "temper #{args.first(2).join(' ')} failed after #{attempts} attempts: #{e.message}" unless delay
-
-        attempts += 1
-        sleep(delay)
-        retry
-      end
-    end
-
-    # The bytes sit in one file for every retry of a write.
-    def with_file(text)
-      Tempfile.create("pr-graph-store") do |handle|
-        handle.write(text)
-        handle.flush
-        yield handle.path
-      end
-    end
-
-    def contents(kind)
-      temper("data-artifact", "list", resource, "--kind", physical_kind(kind)).map { |row| row.fetch("content") }
-    end
-
     # The events of a log in order, each transition once. Two different transitions under one ID raise; a gap
     # or a repeated sequence number fails the log's validator in hydrate.
     def transitions(kind)
       held = {}
-      contents(kind).each do |content|
+      @backend.contents(kind).each do |content|
         id = content.fetch("transition_id")
         raise Error, "#{kind} holds two different transitions with ID #{id}" if held.key?(id) && canonical(held[id]) != canonical(content)
 
@@ -373,7 +283,7 @@ module PrGraph
     def manifests_for(events)
       attempts = events.select { |event| event["e"] == "node" }.to_set { |event| event["attempt_id"] }
       held = {}
-      contents(MANIFEST).each do |content|
+      @backend.contents(MANIFEST).each do |content|
         name = content.fetch("name")
         match = MANIFEST_NAME.match(name) or raise Error, "#{MANIFEST} holds a manifest with an unusable name"
         next unless attempts.include?(match[:attempt])
@@ -427,7 +337,7 @@ module PrGraph
   end
 
   # An event log whose appends go through its store's `append`, which orders them against the local write:
-  # Store takes each in Temper first and refuses on failure; Giraffe::LocalStore journals first and mirrors after.
+  # Store takes each in the backend first and refuses on failure; Giraffe::LocalStore journals first and mirrors after.
   class StoredEventLog < EventLog
     def initialize(store, contract_path: nil)
       @store = store

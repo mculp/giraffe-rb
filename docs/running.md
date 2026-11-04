@@ -26,6 +26,7 @@ base ref before starting. Paths below resolve relative to the configuration file
   "pr_base": "main",
   "runs_dir": "./.giraffe/runs",
   "store": "mirrored",
+  "backend": "temper",
   "context": "+your-team/giraffe-runs",
   "checks": [["bundle", "exec", "rspec"]],
   "lint": [["bundle", "exec", "rubocop"]],
@@ -43,6 +44,10 @@ base ref before starting. Paths below resolve relative to the configuration file
   }
 }
 ```
+
+A `mirrored` store copies the run's records to a `backend` as they are written. `temper` is the default and
+the only backend so far, so `backend` can be left out, and a run started before the key existed mirrors to
+Temper as it always has. `context`, the Temper context ref, is required when `store` is `mirrored`.
 
 Commands are argument arrays. At least one executable check is mandatory, and so is `spec_command`, which
 selects the spec or example named by an audit. It must name `{spec}`; `{spec}` and `{line}` are
