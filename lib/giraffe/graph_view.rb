@@ -14,7 +14,7 @@ module Giraffe
     def snapshot
       view = @run.coordinator.read_view
       state, projection = view.values_at("state", "projection")
-      graph = @run.store.event_log.contract.fetch("graph")
+      graph = @run.graph
       policy = @run.coordinator.policy
       definition = {"nodes" => policy.fetch("nodes"), "dependencies" => graph.fetch("dependencies"), "legal_edges" => graph.fetch("legal_edges")}
       version = Digest::SHA256.hexdigest(JSON.generate(definition))
