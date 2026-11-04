@@ -1,10 +1,10 @@
 # frozen_string_literal: true
 
+require_relative "../protected_paths"
+
 module Giraffe
   module Steps
     module Build
-      PROTECTED = %r{(^|/)(\.git|\.claude|\.cursor|\.giraffe|\.husky|\.env(?:\..*)?|credentials)(/|$)|(^|/)(CLAUDE|AGENTS)\.md$|\.(pem|key)$}
-
       def step_build
         @git.clean!(worktree)
         if (saved_review = attempted_artifact("self_review"))
@@ -96,8 +96,8 @@ module Giraffe
       end
 
       def guard_changed_paths!
-        hooks = @git.hooks_prefix(worktree)
-        forbidden = @git.changed_paths(worktree).select { |path| path.match?(PROTECTED) || (hooks && path.start_with?(hooks)) }
+        protected_paths = ProtectedPaths.new(hooks_prefix: @git.hooks_prefix(worktree))
+        forbidden = protected_paths.among(@git.changed_paths(worktree))
         raise Error, "BUILD changed protected files: #{forbidden.join(', ')}" if forbidden.any?
       end
     end
