@@ -19,7 +19,7 @@ module Giraffe
         file.each_line.map { |line| JSON.parse(line) }
       end
     rescue JSON::ParserError
-      raise Error, "local state journal is damaged; recover from the last Temper checkpoint"
+      raise Error, "local state journal is damaged; recover from the last mirrored checkpoint"
     end
 
     # Mirrors to `backend` as it goes. Without one the run stays local.
@@ -82,12 +82,12 @@ module Giraffe
       held = remote.read_records(PrGraph::Shapes::MANIFEST)
       manifests.each do |name, text|
         next if held.include?({"name" => name, "text" => text})
-        raise Error, "Temper has a different coordinator manifest #{name}" if held.any? { |row| row["name"] == name }
+        raise Error, "#{@backend} has a different coordinator manifest #{name}" if held.any? { |row| row["name"] == name }
         remote.commit_manifest(name, text)
       end
       logs.each do |kind, rows|
         held_rows = remote.read_records(kind).flat_map { |row| row.fetch("events") }.uniq
-        raise Error, "Temper history diverges from this local run" unless held_rows.all? { |row| rows.include?(row) }
+        raise Error, "#{@backend} history diverges from this local run" unless held_rows.all? { |row| rows.include?(row) }
         rows.each { |row| commit_row(kind, row) unless held_rows.include?(row) }
       end
       checkpoint = {"logs" => logs.transform_values(&:length), "manifests" => manifests.transform_values { |text| Digest::SHA256.hexdigest(text) }}

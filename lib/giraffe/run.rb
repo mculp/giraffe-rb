@@ -36,14 +36,17 @@ module Giraffe
       raise Error, "invalid run locator: #{e.message}"
     end
 
-    # Installs a run's last fully synced checkpoint under `destination`. Returns its path and state.
-    def self.restore(id, context:, ticket:, destination:)
+    # Installs a run's last fully synced checkpoint under `destination`, read from `home` (a Backends::Home).
+    # Returns its path and state.
+    # `where` is the restore's flags, {context:} or {database:}, which name the backend it reads from.
+    def self.restore(id, where:, ticket:, destination:)
       raise Error, "invalid run ID" unless id.match?(PrGraph::EventLog::UUID)
+      home = Backends::Home.from(**where)
       destination = File.expand_path(destination)
       raise Error, "restore destination must be empty" if File.exist?(destination) && Dir.children(destination).any?
-      remote = PrGraph::Store.new(backend: Backends.reader({"context" => context}, run_id: id, ticket: ticket), run_id: id)
+      remote = PrGraph::Store.new(backend: Backends.reader(home.settings, run_id: id, ticket: ticket), run_id: id)
       state = remote.latest_checkpoint || raise(Error, "no fully synced checkpoint")
-      raise Error, "checkpoint identity mismatch" unless state["run_id"] == id && state.dig("config", "context") == context
+      raise Error, "checkpoint identity mismatch" unless state["run_id"] == id && home.named_by?(state["config"])
       FileUtils.mkdir_p(destination, mode: 0o700)
       path = File.join(destination, "run.jsonl")
       remote.hydrate(path)

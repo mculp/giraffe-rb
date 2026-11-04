@@ -216,8 +216,8 @@ module PrGraph
       held = @backend.contents(kind).flat_map { |content| content.fetch("events") }.map { |event| event.fetch("seq") }.max
       return if held.nil? || held < next_seq
 
-      raise Error, "#{path} is behind Temper: #{kind} holds sequence #{held} and the next local sequence is #{next_seq}. " \
-                   "Hydrate the run from Temper into a new path instead of appending here"
+      raise Error, "#{path} is behind #{@backend}: #{kind} holds sequence #{held} and the next local sequence is #{next_seq}. " \
+                   "Hydrate the run from #{@backend} into a new path instead of appending here"
     end
 
     # The first attempt an event belongs to, which every write of that attempt is correlated under.
