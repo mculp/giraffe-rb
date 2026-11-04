@@ -5,6 +5,7 @@ require "json"
 require_relative "call_ledger"
 require_relative "schema"
 require_relative "git"
+require_relative "runners/task"
 require_relative "../../scripts/event_log"
 
 module Giraffe
@@ -24,7 +25,7 @@ module Giraffe
       def key(head, answers) = Digest::SHA256.hexdigest(JSON.generate([role, attempt, unit, head, answers]))
 
       def for_runner(prompt, budget)
-        {step: role, prompt: prompt, schema: schema, cwd: cwd, writable: writable, budget_usd: budget}
+        Runners::Task.new(step: role, prompt: prompt, schema: schema, cwd: cwd, writable: writable, budget_usd: budget)
       end
 
       def questions(output, key)
@@ -65,8 +66,8 @@ module Giraffe
 
     def paid_call(request, key)
       limit = budget
-      arguments = request.for_runner(prompt(request, @ledger.refusal(key)), limit)
-      result = guarded(request) { billed(key, request.role, limit) { @runner.call(**arguments) } }
+      task = request.for_runner(prompt(request, @ledger.refusal(key)), limit)
+      result = guarded(request) { billed(key, request.role, limit) { @runner.call(task) } }
       result.fetch("output")
     end
 
