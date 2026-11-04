@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "rbconfig"
+require_relative "../safe_path"
 
 module Giraffe
   module Steps
@@ -45,7 +46,7 @@ module Giraffe
       def save_reproduction(output)
         spec = output.fetch("regression_spec")
         raise InvalidOutput, "regression_spec must be a file path, not a command or filter: #{spec}" if spec.match?(%r{[\s:]|/\z})
-        raise InvalidOutput, "regression_spec must be a file path, not a directory: #{spec}" if File.directory?(safe_file(worktree, spec, existing: false))
+        raise InvalidOutput, "regression_spec must be a file path, not a directory: #{spec}" if File.directory?(SafePath.new(worktree).target(spec))
         raise InvalidOutput, "regression_spec is gitignored, so no commit can carry it: #{spec}" if @git.ignored?(worktree, spec)
         result = run_probe(output.fetch("source"))
         unless result["exit_code"] == output["expected_exit"] && result["excerpt"].include?(output["expected_output"])

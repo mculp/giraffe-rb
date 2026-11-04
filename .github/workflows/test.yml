@@ -18,3 +18,6 @@ jobs:
           ruby-version: "3.4"
       - run: gem install sqlite3 -v 2.10.2 --no-document
       - run: bin/test
+      # Pinned because the baseline's counts are this version's. bin/test needs no gems, so only this step installs one.
+      - run: gem install rubocop -v 1.87.0 --no-document
+      - run: bin/sandi

@@ -119,7 +119,7 @@ VERIFY runs them after the ordinary checks pass, on every ticket, each in a new 
 the network is open, because a browser suite needs it. So this is the candidate's code with the network: it can reach
 anything on localhost and send what it can read to anywhere. That is why it reads nothing in the home directory but the
 tools on its PATH, the `lib` and `libexec` beside them and git's configuration, and never the credential stores listed
-in `lib/giraffe/checks.rb`. A suite that needs more of home fails, such as one using Playwright's own browsers rather
+in `lib/giraffe/sandbox/seatbelt.rb`. A suite that needs more of home fails, such as one using Playwright's own browsers rather
 than the system Chrome, or a version manager's shims rather than its tool's own directory on PATH. No check can reach
 the keychain, and Chrome depends on that here: with that rule removed, Chrome in the fixture's check cannot draw. Writes
 stay in the checkout and temporary directories, which is why the command above moves npm's cache. Chrome cannot start

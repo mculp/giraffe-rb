@@ -1,0 +1,233 @@
+{
+  "offenses": {
+    "counter": "RuboCop 1.87.0, the Metrics cops at the limits in .rubocop.yml, counting code lines",
+    "counts": {
+      "lib/giraffe/checks.rb": {
+        "MethodLength": 1
+      },
+      "lib/giraffe/command.rb": {
+        "MethodLength": 1,
+        "ParameterLists": 1
+      },
+      "lib/giraffe/config.rb": {
+        "MethodLength": 3
+      },
+      "lib/giraffe/git.rb": {
+        "ClassLength": 1,
+        "MethodLength": 6
+      },
+      "lib/giraffe/graph_view.rb": {
+        "MethodLength": 2,
+        "ParameterLists": 1
+      },
+      "lib/giraffe/harness.rb": {
+        "ClassLength": 1,
+        "MethodLength": 4,
+        "ParameterLists": 2
+      },
+      "lib/giraffe/local_store.rb": {
+        "ClassLength": 1,
+        "MethodLength": 3,
+        "ParameterLists": 1
+      },
+      "lib/giraffe/model.rb": {
+        "MethodLength": 1
+      },
+      "lib/giraffe/mutation_runner.rb": {
+        "MethodLength": 2,
+        "ParameterLists": 1
+      },
+      "lib/giraffe/run.rb": {
+        "MethodLength": 5
+      },
+      "lib/giraffe/runners/claude.rb": {
+        "MethodLength": 1,
+        "ParameterLists": 1
+      },
+      "lib/giraffe/runners/scripted.rb": {
+        "MethodLength": 1
+      },
+      "lib/giraffe/schema.rb": {
+        "MethodLength": 3
+      },
+      "lib/giraffe/screen_checks.rb": {
+        "MethodLength": 1
+      },
+      "lib/giraffe/shapes.rb": {
+        "MethodLength": 3,
+        "ParameterLists": 1
+      },
+      "lib/giraffe/steps/build.rb": {
+        "MethodLength": 4
+      },
+      "lib/giraffe/steps/preparation.rb": {
+        "MethodLength": 3
+      },
+      "lib/giraffe/steps/publish.rb": {
+        "MethodLength": 1
+      },
+      "lib/giraffe/steps/verify.rb": {
+        "MethodLength": 7,
+        "ModuleLength": 1
+      },
+      "lib/giraffe/store.rb": {
+        "ClassLength": 1,
+        "MethodLength": 15,
+        "ParameterLists": 1
+      },
+      "lib/giraffe/tickets.rb": {
+        "MethodLength": 1
+      },
+      "scripts/ac_audit_contract.rb": {
+        "MethodLength": 2
+      },
+      "scripts/artifact_log.rb": {
+        "ClassLength": 1,
+        "MethodLength": 19,
+        "ParameterLists": 6
+      },
+      "scripts/artifacts.rb": {
+        "MethodLength": 3
+      },
+      "scripts/coordinate.rb": {
+        "MethodLength": 5
+      },
+      "scripts/coordinator_runtime.rb": {
+        "ClassLength": 1,
+        "MethodLength": 55,
+        "ParameterLists": 12
+      },
+      "scripts/event_log.rb": {
+        "ClassLength": 1,
+        "MethodLength": 11,
+        "ParameterLists": 2
+      },
+      "scripts/events.rb": {
+        "MethodLength": 2
+      },
+      "scripts/failure_log.rb": {
+        "ClassLength": 1,
+        "MethodLength": 13,
+        "ParameterLists": 2
+      },
+      "scripts/feedback.rb": {
+        "MethodLength": 1
+      },
+      "scripts/feedback_contract.rb": {
+        "ClassLength": 1,
+        "MethodLength": 5
+      },
+      "scripts/github_feedback.rb": {
+        "ClassLength": 1,
+        "MethodLength": 18,
+        "ParameterLists": 2
+      },
+      "scripts/github_pr_ci.rb": {
+        "ClassLength": 1,
+        "MethodLength": 10,
+        "ParameterLists": 2
+      },
+      "scripts/lineage_contract.rb": {
+        "MethodLength": 3
+      },
+      "scripts/metrics.rb": {
+        "MethodLength": 9
+      },
+      "scripts/outcome_contract.rb": {
+        "ClassLength": 1,
+        "MethodLength": 6
+      },
+      "scripts/outcome_coverage.rb": {
+        "ClassLength": 1,
+        "MethodLength": 5,
+        "ParameterLists": 3
+      },
+      "scripts/outcomes.rb": {
+        "MethodLength": 1
+      },
+      "scripts/pr_ci.rb": {
+        "MethodLength": 1
+      },
+      "scripts/pr_ci_contract.rb": {
+        "ClassLength": 1,
+        "MethodLength": 3
+      },
+      "scripts/program.rb": {
+        "ClassLength": 1,
+        "MethodLength": 13
+      },
+      "scripts/repro_contract.rb": {
+        "MethodLength": 3,
+        "ParameterLists": 1
+      },
+      "scripts/run_record.rb": {
+        "ClassLength": 1,
+        "MethodLength": 3,
+        "ParameterLists": 1
+      },
+      "scripts/seed.rb": {
+        "MethodLength": 1
+      },
+      "scripts/seed_contract.rb": {
+        "ClassLength": 1,
+        "MethodLength": 9
+      },
+      "scripts/seed_runtime.rb": {
+        "ClassLength": 1,
+        "MethodLength": 13,
+        "ParameterLists": 5
+      },
+      "scripts/spec_audit.rb": {
+        "MethodLength": 1
+      },
+      "scripts/spec_audit_contract.rb": {
+        "ClassLength": 1,
+        "MethodLength": 4
+      },
+      "scripts/temper_cli.rb": {
+        "MethodLength": 2
+      },
+      "scripts/temper_grounding.rb": {
+        "ClassLength": 1,
+        "MethodLength": 7,
+        "ParameterLists": 1
+      },
+      "scripts/usage_hook.rb": {
+        "MethodLength": 4,
+        "ParameterLists": 1
+      }
+    }
+  },
+  "rule 4": {
+    "counter": "distinct constants a script calls methods on outside any def, read with Prism; limit 1",
+    "counts": {
+      "bin/giraffe": {
+        "Constants": 5
+      },
+      "scripts/artifacts.rb": {
+        "Constants": 4
+      },
+      "scripts/coordinate.rb": {
+        "Constants": 2
+      },
+      "scripts/events.rb": {
+        "Constants": 2
+      },
+      "scripts/failures.rb": {
+        "Constants": 2
+      },
+      "scripts/feedback.rb": {
+        "Constants": 3
+      },
+      "scripts/pr_ci.rb": {
+        "Constants": 3
+      },
+      "scripts/seed.rb": {
+        "Constants": 2
+      },
+      "scripts/usage_hook.rb": {
+        "Constants": 3
+      }
+    }
+  }
+}

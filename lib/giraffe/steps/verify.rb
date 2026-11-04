@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative "../safe_path"
+
 module Giraffe
   module Steps
     module Verify
@@ -140,17 +142,17 @@ module Giraffe
 
       def require_changed_spec_line!(ref, paths)
         path, line = ref.split(":", 2)
-        return if paths.include?(path) && line.to_s.match?(/\A[1-9][0-9]*\z/) && line.to_i <= File.readlines(safe_file(worktree, path)).length
+        return if paths.include?(path) && line.to_s.match?(/\A[1-9][0-9]*\z/) && line.to_i <= File.readlines(SafePath.new(worktree).file(path)).length
         raise InvalidOutput, "spec audit must cite a real changed spec and line: #{ref}"
       end
 
       # Both sides run from a clean checkout, so missing generated files cannot pass for the bug being red.
       def regression(candidate)
         path = artifact("repro_report").fetch("rerun")
-        source = File.binread(safe_file(worktree, path))
+        source = File.binread(SafePath.new(worktree).file(path))
         fixed = @git.at_commit(worktree, candidate) { |tree| @checks.run(tree, [spec_command(path)]).first }
         broken = @git.at_commit(worktree, base_sha) do |tree|
-          target = safe_file(tree, path, existing: false)
+          target = SafePath.new(tree).target(path)
           FileUtils.mkdir_p(File.dirname(target))
           File.binwrite(target, source)
           @checks.run(tree, [spec_command(path)]).first
@@ -161,25 +163,6 @@ module Giraffe
       def regression_result(sha, result)
         excerpt = result["excerpt"].strip.empty? ? "exit #{result['exit_code']}" : result["excerpt"]
         {"sha" => sha, "result" => result["exit_code"].zero? ? "pass" : "fail", "excerpt" => excerpt}
-      end
-
-      # A proof path comes from a model's output, so a bad one is that output's fault.
-      def safe_file(root, relative, existing: true)
-        root = File.realpath(root)
-        inside = "#{root}/"
-        raise InvalidOutput, "invalid relative proof path: #{relative}" if relative.start_with?("/", "-") || relative.split("/").any? { |part| %w[. .. .git].include?(part) }
-        target = File.expand_path(relative, root)
-        raise InvalidOutput, "proof path escapes its worktree: #{relative}" unless target.start_with?(inside)
-        if existing
-          raise InvalidOutput, "proof file is missing or a symlink: #{relative}" unless File.file?(target) && !File.symlink?(target) && File.realpath(target).start_with?(inside)
-        else
-          parent = File.dirname(target)
-          parent = File.dirname(parent) until File.exist?(parent)
-          real_parent = File.realpath(parent)
-          raise InvalidOutput, "proof path follows a symlink outside the worktree: #{relative}" unless real_parent == root || real_parent.start_with?(inside)
-          raise InvalidOutput, "proof target is a symlink: #{relative}" if File.symlink?(target)
-        end
-        target
       end
     end
   end
