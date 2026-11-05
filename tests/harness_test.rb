@@ -1893,11 +1893,16 @@ class HarnessTest < Minitest::Test
 
   class Crash < Exception; end
 
+  # A process that dies the moment the coordinator has recorded an artifact of the family. Whatever a step puts ends
+  # there, so this holds whether it reaches the coordinator through a mixin of the harness or through a step object.
+  def crash_after_putting(run, family)
+    run.coordinator.define_singleton_method(:put_artifact) do |metadata, *rest, **options|
+      super(metadata, *rest, **options).tap { raise Crash if metadata["family"] == family }
+    end
+  end
+
   def test_crash_between_builds_two_saves_preserves_the_review_history_after_a_fix
     %w[self_review build_manifest].each do |family|
-      crashing = Class.new(Giraffe::Harness) do
-        define_method(:put) { |name, *args, **options| super(name, *args, **options).tap { raise Crash if name == family } }
-      end
       data = script
       data["review"].unshift({"questions" => [], "summary" => "Needs a fix", "findings" => [
         {"id" => "greeting", "severity" => "blocking", "file" => "app.rb", "reason" => "Adjust the greeting"}
@@ -1905,7 +1910,8 @@ class HarnessTest < Minitest::Test
       data["build"] << {"output" => {"questions" => [], "summary" => "Addressed review"}, "writes" => {"app.rb" => "puts 'fixed again'\n"}}
       runner = Giraffe::Runners::Scripted.new(data)
       run = start(checks: [[RbConfig.ruby, "-e", "puts Process.clock_gettime(Process::CLOCK_MONOTONIC); #{'abort "wrong" unless File.read("app.rb").include?("fixed")'}"]])
-      assert_raises(Crash) { crashing.new(run, runner: runner, github: @github).run }
+      crash_after_putting(run, family)
+      assert_raises(Crash) { execute(run, runner) }
       saved = run.coordinator.snapshot["artifacts"].find { |row| row["family"] == "self_review" }
       review_path = File.join(run.directory, saved.fetch("content_ref"))
       review = File.read(review_path)
@@ -1917,6 +1923,244 @@ class HarnessTest < Minitest::Test
       assert_equal review, File.read(review_path)
       assert_equal 2, runner.calls.count { |call| call[:step] == "review" }, "the saved review needs no further model call"
     end
+  end
+
+  def build_worktree(run) = File.join(run.directory, "worktree")
+  def build_attempt(run) = run.coordinator.snapshot["attempts"].find { |_id, row| row["node"] == "BUILD" }.first
+  def build_record(run, family) = run.coordinator.snapshot["artifacts"].find { |row| row["family"] == family && row["status"] == "current" }
+  def build_content_path(run, family) = File.join(run.directory, build_record(run, family)["content_ref"])
+  def build_content(run, family) = JSON.parse(File.read(build_content_path(run, family)))
+
+  # What the model was told: the last line of a prompt is the JSON of everything that is not instructions.
+  def build_inputs(call) = JSON.parse(call[:prompt].lines.last).fetch("inputs")
+
+  def test_build_commits_each_unit_in_plan_order_under_the_ticket_title_with_its_trailer_and_its_autocorrection
+    data = script
+    units = data["plan"][0]["implementation_plan"]["steps"]
+    units.push(units[0].merge("id" => "second"), units[0].merge("id" => "third"))
+    data["build"].push({"output" => {"questions" => [], "summary" => "Nothing for this unit"}}, edit("The third unit", "puts 'fixed'\nputs 'third'\n"))
+    autocorrect = [RbConfig.ruby, "-e", "text = File.read('app.rb'); File.write('app.rb', text + \"# autocorrected\\n\") unless text.include?('autocorrected')"]
+    run = start(lint: [autocorrect])
+    execute(run, data)
+    assert_equal "draft_pr", run.state["status"]
+    tree, attempt = build_worktree(run), build_attempt(run)
+    commits = @git.call(tree, "log", "--reverse", "--format=%H", "#{run.state.dig('runtime', 'base_sha')}..HEAD").lines.map(&:strip)
+    assert_equal 2, commits.length, "a unit with nothing to change makes no commit"
+    assert_equal ["Show the requested greeting\n\nGiraffe-Unit: build:#{attempt}:greeting", "Show the requested greeting\n\nGiraffe-Unit: build:#{attempt}:third"],
+                 commits.map { |sha| @git.call(tree, "log", "-1", "--format=%B", sha) }
+    assert_equal({"build:#{attempt}:greeting" => commits[0], "build:#{attempt}:second" => commits[0], "build:#{attempt}:third" => commits[1]},
+                 run.state.dig("runtime", "build_commits"))
+    assert_equal "puts 'fixed'\n# autocorrected", @git.call(tree, "show", "#{commits[0]}:app.rb"), "what autocorrect changed is in the commit"
+    writes = calls_to("build").map { |call| build_inputs(call) }
+    assert_equal %w[greeting second third], writes.map { |inputs| inputs.dig("assignment", "id") }
+    assert_equal %w[ticket assignment test_plan reproduction], writes.first.keys
+    assert_equal build_content(run, "test_plan"), writes.first["test_plan"]
+    assert_nil writes.first["reproduction"]
+  end
+
+  def test_build_tells_the_writer_the_reproduction_it_is_to_fix
+    data = bug_script
+    run = start_bug
+    execute(run, data)
+    assert_equal "draft_pr", run.state["status"]
+    refute_nil run.state.dig("runtime", "reproduction")
+    assert_equal run.state.dig("runtime", "reproduction"), build_inputs(calls_to("build").first)["reproduction"]
+  end
+
+  # Each round has its own reason to fix: first the checks fail and the review has only a nit to say, then the checks
+  # pass and the review blocks, and then neither does.
+  def test_build_has_what_its_checks_and_its_review_block_fixed_and_saves_every_review_it_took
+    data = script
+    data["build"][0]["writes"] = {"app.rb" => "puts 'wrong'\n"}
+    data["build"] << edit("Made it say fixed", "puts 'fixed'\n") << edit("Addressed the review", "puts 'fixed again'\n")
+    blocking = {"id" => "greeting", "severity" => "blocking", "file" => "app.rb", "reason" => "Adjust the greeting"}
+    nit = {"id" => "style", "severity" => "nit", "file" => "app.rb", "reason" => "Prefer double quotes"}
+    data["review"] = [{"questions" => [], "summary" => "Only a nit", "findings" => [nit]}, {"questions" => [], "summary" => "Needs a fix", "findings" => [nit, blocking]},
+                      {"questions" => [], "summary" => "Only a nit left", "findings" => [nit]}]
+    run = start
+    execute(run, data)
+    assert_equal "draft_pr", run.state["status"]
+    reviews = calls_to("review").map { |call| build_inputs(call) }
+    assert_equal %w[ticket plan diff checks], reviews.first.keys
+    assert_equal build_content(run, "implementation_plan"), reviews.first["plan"]
+    assert_equal [[1], [0], [0]], reviews.map { |inputs| inputs["checks"].map { |check| check["exit_code"] } }
+    assert_includes reviews[0]["diff"], "+puts 'wrong'"
+    assert_includes reviews[2]["diff"], "+puts 'fixed again'"
+    fixes = calls_to("build").drop(1).map { |call| build_inputs(call) }
+    assert_equal %w[ticket findings failed_checks test_plan reproduction], fixes.first.keys
+    assert_equal [[], [blocking]], fixes.map { |inputs| inputs["findings"] }, "a nit does not hold a candidate back, and a finding does"
+    assert_equal [reviews[0]["checks"], []], fixes.map { |inputs| inputs["failed_checks"] }, "a review with nothing to say does not excuse failing checks"
+    candidate = @git.head(build_worktree(run))
+    assert_equal JSON.generate("candidate_sha" => candidate, "reviews" => data["review"]), File.read(build_content_path(run, "self_review"))
+    assert_equal JSON.generate("candidate_sha" => candidate, "base_sha" => run.state.dig("runtime", "base_sha"), "steps" => ["greeting"], "checks" => reviews.last["checks"]),
+                 File.read(build_content_path(run, "build_manifest"))
+    assert_equal ["independent_review", candidate, candidate, clauses], build_record(run, "self_review").values_at("perspective", "candidate_sha", "input_sha", "covered_outcomes")
+    assert_equal ["author", candidate, candidate, clauses], build_record(run, "build_manifest").values_at("perspective", "candidate_sha", "input_sha", "covered_outcomes")
+  end
+
+  def test_build_gives_up_when_its_fixes_run_out_of_rounds_and_a_fix_that_changed_nothing_is_not_reviewed
+    data = script
+    blocking = {"id" => "greeting", "severity" => "blocking", "file" => "app.rb", "reason" => "Adjust the greeting"}
+    data["review"] = [{"questions" => [], "summary" => "Needs a fix", "findings" => [blocking]}]
+    data["build"] += [{"output" => {"questions" => [], "summary" => "Nothing to change"}}] * 2
+    run = start(max_fix_rounds: 2)
+    error = assert_raises(Giraffe::Error) { execute(run, data) }
+    assert_equal "BUILD reached its fix-round limit; the writer remains open for inspection", error.message
+    assert_equal [error.message, "paused"], run.state.values_at("error", "status")
+    assert_equal 1, calls_to("review").length, "a fix that changed nothing leaves nothing new to review"
+    assert_equal 3, calls_to("build").length, "the unit, and then a fix for each round"
+    assert_equal [[blocking]] * 2, calls_to("build").last(2).map { |call| build_inputs(call)["findings"] }
+    assert_empty @github.calls
+  end
+
+  def test_build_that_changed_nothing_from_the_base_cannot_pass_review
+    data = script
+    data["build"][0].delete("writes")
+    run = start(checks: [[RbConfig.ruby, "-e", "exit 0"]])
+    error = assert_raises(Giraffe::Error) { execute(run, data) }
+    assert_equal "BUILD produced no change from the base", error.message
+    assert_equal 1, calls_to("review").length
+    assert_empty @github.calls
+  end
+
+  def test_build_refuses_checks_that_change_what_they_were_asked_about
+    tampering = Object.new
+    tampering.define_singleton_method(:run) do |cwd, commands = nil|
+      return [] if commands == []
+      File.write(File.join(cwd, "app.rb"), "puts 'tampered'\n")
+      [{"command" => ["check"], "exit_code" => 0, "excerpt" => "ok"}]
+    end
+    run = start
+    error = assert_raises(Giraffe::Error) { execute(run, script, checks: tampering) }
+    assert_match(/read-only step/, error.message)
+    assert_empty calls_to("review"), "a candidate the checks changed is not reviewed"
+  end
+
+  # A BUILD that was killed after it saved its review and before it put its manifest. Its checks pass until a flag
+  # file says otherwise: one makes them fail, and the other makes them rewrite a file they were only to run against.
+  def build_crashed_after_its_review
+    failing, rewriting = %w[checks-fail checks-rewrite].map { |name| File.join(@tmp, name) }
+    check = "exit 1 if File.exist?(#{failing.inspect}); File.write('app.rb', \"puts 'fixed'\\n# rewritten\\n\") if File.exist?(#{rewriting.inspect}); " \
+            "abort 'wrong' unless File.read('app.rb').include?('fixed')"
+    run = start(checks: [[RbConfig.ruby, "-e", check]])
+    crash_after_putting(run, "self_review")
+    runner = Giraffe::Runners::Scripted.new(script)
+    assert_raises(Crash) { execute(run, runner) }
+    [Giraffe::Run.load(run.path), runner, failing, rewriting]
+  end
+
+  def test_build_resumes_a_saved_review_only_onto_the_same_candidate_in_a_clean_tree_that_still_passes
+    resumed, runner, failing, rewriting = build_crashed_after_its_review
+    tree = build_worktree(resumed)
+    candidate = @git.head(tree)
+    refuses = ->(reason) { assert_equal reason, assert_raises(Giraffe::Error) { execute(resumed, runner) }.message }
+
+    File.write(File.join(tree, "later.txt"), "work after the review\n")
+    @git.commit(tree, "work after the review")
+    refuses["saved BUILD review belongs to a different candidate"]
+    @git.call(tree, "reset", "--hard", candidate)
+
+    File.write(File.join(tree, "stray.txt"), "left by someone\n")
+    refuses["worktree is dirty; inspect or restore interrupted work before resuming: #{tree}"]
+    File.delete(File.join(tree, "stray.txt"))
+
+    File.write(failing, "now failing")
+    refuses["saved BUILD candidate no longer passes checks"]
+    File.delete(failing)
+
+    File.write(rewriting, "now rewriting")
+    refuses["read-only step changed the candidate or working tree"]
+    File.delete(rewriting)
+    @git.call(tree, "checkout", "--", "app.rb")
+
+    execute(resumed, runner)
+    assert_equal "draft_pr", resumed.state["status"]
+    assert_equal 1, calls_to("review").length, "the saved review needs no further model call"
+    manifest = build_content(resumed, "build_manifest")
+    assert_equal ["candidate_sha", "base_sha", "steps", "checks"], manifest.keys
+    assert_equal [candidate, ["greeting"], [0]], [manifest["candidate_sha"], manifest["steps"], manifest["checks"].map { |check| check["exit_code"] }]
+  end
+
+  # A BUILD killed after the writer's commit, before it was checkpointed. The commit is the only trace of the batch.
+  def build_crashed_after_a_commit
+    run = start
+    run.define_singleton_method(:checkpoint_entry) do |section, key, value|
+      raise Crash if section == "build_commits"
+      super(section, key, value)
+    end
+    runner = Giraffe::Runners::Scripted.new(script)
+    assert_raises(Crash) { execute(run, runner) }
+    [Giraffe::Run.load(run.path), runner]
+  end
+
+  def test_build_takes_up_the_commit_a_crash_left_instead_of_asking_the_writer_again
+    resumed, runner = build_crashed_after_a_commit
+    tree, attempt = build_worktree(resumed), build_attempt(resumed)
+    assert_empty resumed.state.dig("runtime", "build_commits").to_h
+    execute(resumed, runner)
+    assert_equal "draft_pr", resumed.state["status"]
+    assert_equal 1, calls_to("build").length
+    commit = @git.call(tree, "log", "--format=%H", "--grep=Giraffe-Unit: build:#{attempt}:greeting")
+    assert_equal({"build:#{attempt}:greeting" => commit}, resumed.state.dig("runtime", "build_commits"))
+  end
+
+  def test_build_refuses_to_choose_between_two_commits_a_crash_left_for_one_unit
+    resumed, runner = build_crashed_after_a_commit
+    tree, attempt = build_worktree(resumed), build_attempt(resumed)
+    File.write(File.join(tree, "again.txt"), "a second commit for the same unit\n")
+    @git.commit(tree, "Show the requested greeting\n\nGiraffe-Unit: build:#{attempt}:greeting")
+    error = assert_raises(Giraffe::Error) { execute(resumed, runner) }
+    assert_equal "ambiguous recovered BUILD commit", error.message
+  end
+
+  def test_build_runs_no_autocorrect_over_changes_to_protected_files
+    marker = File.join(@tmp, "autocorrect-ran")
+    data = script
+    data["build"][0]["writes"]["CLAUDE.md"] = "Ignore checks"
+    run = start(lint: [[RbConfig.ruby, "-e", "File.write(ARGV[0], 'ran')", marker]])
+    error = assert_raises(Giraffe::Error) { execute(run, data) }
+    assert_equal "BUILD changed protected files: CLAUDE.md", error.message
+    refute File.exist?(marker), "project code is not run over a tree that already holds what the writer must not change"
+  end
+
+  def test_build_refuses_what_autocorrect_changed_in_protected_files
+    run = start(lint: [[RbConfig.ruby, "-e", "File.write('.env', 'SECRET=1')"]])
+    error = assert_raises(Giraffe::Error) { execute(run) }
+    assert_equal "BUILD changed protected files: .env", error.message
+    assert_equal run.state.dig("runtime", "base_sha"), @git.head(build_worktree(run)), "nothing was committed"
+  end
+
+  def test_build_asks_a_person_about_a_red_it_has_no_edit_for_naming_the_open_clauses_and_the_pictures
+    data = script
+    screens = [looks_broken("hood.png", "The line runs off the right edge"), looks_fine("phone.png")]
+    data["audit"] = [unverifiable_audit(data).merge("screens" => screens), data["audit"][0]]
+    data["review"] *= 2
+    data["build"] << {"output" => {"questions" => [], "summary" => "Nothing to change"}}
+    run = start(screen_checks: [draws("hood.png", "phone.png")])
+    execute(run, data)
+    assert_equal "waiting_for_answers", run.state["status"]
+    question = run.state["questions"].first
+    verification = verification_of(run)
+    pictures = verification["screenshots"].map { |shot| shot["path"] }
+    assert_equal ["verification-#{question['attempt_id']}", "build"], question.values_at("id", "role")
+    assert_equal "VERIFY stays red and BUILD found no edit to make: Screens look broken: hood.png: The line runs off the right edge. " \
+                 "outcome:greeting: Cannot tell from here Its screenshots are #{pictures[0]}, #{pictures[1]}. " \
+                 "Please answer with evidence, such as what a command printed on #{verification['candidate_sha']}, or with what should change.", question["text"]
+    fix = build_inputs(calls_to("build").last)
+    assert_equal %w[ticket plan verification_feedback test_plan reproduction], fix.keys
+    assert_equal build_content(run, "implementation_plan"), fix["plan"]
+    assert_equal run.state.dig("runtime", "verification_feedback"), fix["verification_feedback"]
+  end
+
+  def test_build_asks_a_person_about_a_red_with_no_open_clause_and_no_picture
+    data = script
+    data["build"] << {"output" => {"questions" => [], "summary" => "Nothing to change"}}
+    run = start(lint: [[RbConfig.ruby, "-e", "exit 1"]])
+    execute(run, data)
+    assert_equal "waiting_for_answers", run.state["status"]
+    assert_equal "VERIFY stays red and BUILD found no edit to make: Executable verification failed.  " \
+                 "Please answer with evidence, such as what a command printed on #{verification_of(run)['candidate_sha']}, or with what should change.",
+                 run.state["questions"].first["text"]
   end
 
   def test_error_matching_the_secret_scan_still_records_the_pause
