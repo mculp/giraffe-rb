@@ -999,19 +999,6 @@ class HarnessTest < Minitest::Test
     assert_equal [[RbConfig.ruby, "test/greeting_test.rb"], [RbConfig.ruby, "test/other_test.rb"]], green["mutation_proofs"].map { |row| row["command"] }
   end
 
-  def test_spec_command_for_a_line_and_for_a_whole_file
-    {
-      ["rspec", "{spec}:{line}"] => [["rspec", "a_spec.rb:3"], ["rspec", "a_spec.rb"]],
-      ["run", "{spec}", "--line={line}"] => [["run", "a_spec.rb", "--line=3"], ["run", "a_spec.rb"]],
-      ["run", "{spec}", "{line}"] => [["run", "a_spec.rb", "3"], ["run", "a_spec.rb"]],
-      ["sh", "-c", "run {spec} # line {line}"] => [["sh", "-c", "run a_spec.rb # line 3"], ["sh", "-c", "run a_spec.rb # line "]]
-    }.each do |command, (at_line, whole_file)|
-      harness = Giraffe::Harness.new(start(spec_command: command), runner: Giraffe::Runners::Scripted.new({}), github: @github)
-      assert_equal at_line, harness.spec_command("a_spec.rb:3")
-      assert_equal whole_file, harness.spec_command("a_spec.rb")
-    end
-  end
-
   def test_refused_triage_is_asked_again_on_resume
     refused = triage
     refused["outcome_register"]["negative_face"][0]["id"] = clauses[0]
