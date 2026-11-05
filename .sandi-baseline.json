@@ -53,9 +53,6 @@
       "lib/giraffe/steps/preparation.rb": {
         "MethodLength": 3
       },
-      "lib/giraffe/steps/publish.rb": {
-        "MethodLength": 1
-      },
       "lib/giraffe/steps/verify.rb": {
         "MethodLength": 6,
         "ModuleLength": 1
