@@ -31,3 +31,4 @@ venv/
 
 # The build skill's eval suite, not build output
 !evals/build/
+*.gem

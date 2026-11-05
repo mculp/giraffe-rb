@@ -1,29 +1,12 @@
-# Sandi Metz's limits, and only those: bin/sandi counts these offenses against .sandi-baseline.json and lets the
-# counts fall but never rise. A directory of code that is not under Include is not measured.
+# Sandi Metz's limits, and only those, from the sandi gem: `bundle exec sandi` counts these offenses against
+# .sandi-baseline.json and lets the counts fall but never rise. A directory of code that is not under Include is not
+# measured.
+inherit_gem:
+  sandi: config/sandi.yml
+
 AllCops:
-  DisabledByDefault: true
-  NewCops: disable
-  SuggestExtensions: false
   TargetRubyVersion: 3.4
   Include:
     - bin/giraffe
-    - bin/sandi
     - lib/**/*.rb
     - scripts/*.rb
-
-Metrics/ClassLength:
-  Enabled: true
-  Max: 100
-
-Metrics/ModuleLength:
-  Enabled: true
-  Max: 100
-
-Metrics/MethodLength:
-  Enabled: true
-  Max: 5
-
-Metrics/ParameterLists:
-  Enabled: true
-  Max: 4
-  CountKeywordArgs: true
