@@ -6,28 +6,6 @@ require_relative "../safe_path"
 module Giraffe
   module Steps
     module Preparation
-      def step_triage
-        @git.clean!(@run.config["repo"])
-        ask("triage", {}, cwd: @run.config["repo"]) { |output| put("triage_brief", output.merge("ticket" => @run.state["ticket"])) }
-        finish
-      end
-
-      def step_worktree
-        manifest = @git.worktree(repo: @run.config["repo"], path: worktree,
-                                branch: "codex/giraffe-#{@run.id}", base: @run.config["base"])
-        checkpoint("base_sha", manifest["base_sha"])
-        put("worktree_manifest", manifest)
-        finish
-      end
-
-      def step_investigate
-        reports = %w[ticket prior_art codebase].to_h do |perspective|
-          [perspective, ask("investigate", {"perspective" => perspective, "triage" => artifact("triage_brief")}, unit: perspective)]
-        end
-        put("investigation_report", {"reports" => reports})
-        finish
-      end
-
       def step_reproduce
         if attempted_artifact("repro_report")
           finish
@@ -68,17 +46,6 @@ module Giraffe
         probe = File.join(scratch, "probe.rb")
         File.write(probe, source, mode: "w", perm: 0o600)
         @git.at_commit(worktree, base_sha) { |tree| @checks.run(tree, [[RbConfig.ruby, probe]]).first }
-      end
-
-      def step_plan
-        ask("plan", {"triage" => artifact("triage_brief"), "investigation" => artifact("investigation_report"), "reproduction" => artifact("repro_report"),
-                     "screen_checks" => @run.config["screen_checks"].to_a}) do |output|
-          @run.coordinator.validate_plan!(output["implementation_plan"], output["test_plan"])
-          put("implementation_plan", output.fetch("implementation_plan"))
-          put("test_plan", output.fetch("test_plan"))
-          checkpoint("ui", output.fetch("ui"))
-        end
-        finish
       end
     end
   end
