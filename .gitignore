@@ -19,8 +19,8 @@ Thumbs.db
 # Dependencies / build
 __pycache__/
 *.pyc
-dist/
-build/
+/dist/
+/build/
 .venv/
 venv/
 
