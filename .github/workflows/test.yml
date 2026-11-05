@@ -17,7 +17,8 @@ jobs:
         with:
           ruby-version: "3.4"
       - run: gem install sqlite3 -v 2.10.2 --no-document
+      - run: gem install json_schemer -v 2.5.0 --no-document
       - run: bin/test
-      # Pinned because the baseline's counts are this version's. bin/test needs no gems, so only this step installs one.
+      # Pinned because the baseline's counts are this version's. bin/test does not need RuboCop, so only bin/sandi's step installs it.
       - run: gem install rubocop -v 1.87.0 --no-document
       - run: bin/sandi

@@ -14,10 +14,10 @@ linked private documents and remote prior art is not implemented yet.
 
 ## Configuration
 
-Needs Ruby 3.4+, Git, Claude Code 2.1.312+, `gh`, and a Temper CLI login for mirrored mode with the
-Temper backend. Temper users need no gems; the SQLite backend needs `gem install sqlite3`. No
-TypeScript runtime is needed. Configure Git author identity and fetch the target repository's
-base ref before starting. Paths below resolve relative to the configuration file.
+Needs Ruby 3.4+, the json_schemer gem (`gem install json_schemer`), Git, Claude Code 2.1.312+, `gh`,
+and a Temper CLI login for mirrored mode with the Temper backend. The SQLite backend also needs
+`gem install sqlite3`. No TypeScript runtime is needed. Configure Git author identity and fetch the
+target repository's base ref before starting. Paths below resolve relative to the configuration file.
 
 ```json
 {

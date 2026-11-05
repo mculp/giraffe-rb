@@ -37,9 +37,6 @@
       "lib/giraffe/runners/scripted.rb": {
         "MethodLength": 1
       },
-      "lib/giraffe/schema.rb": {
-        "MethodLength": 3
-      },
       "lib/giraffe/screen_checks.rb": {
         "MethodLength": 1
       },
