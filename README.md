@@ -33,7 +33,7 @@ The design's Repository section covers where the harness, runners, and store go.
 
 ## Tests
 
-Needs Ruby 3.4, Python 3, and git.
+Needs Ruby 3.4 with the json_schemer gem, Python 3, and git.
 
 ```sh
 bin/test
