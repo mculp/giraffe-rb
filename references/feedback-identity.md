@@ -1,6 +1,7 @@
 # Automated feedback identity contract
 
-BOT-FEEDBACK uses `scripts/feedback.rb`. It reconciles remote state; counts, array positions,
+BOT-FEEDBACK uses `PrGraph::GitHubFeedback#reconcile` in `scripts/github_feedback.rb`. It
+reconciles remote state; counts, array positions,
 display names, and timestamps alone never decide whether the gate is clean.
 
 ## Remote projection
@@ -46,28 +47,31 @@ surface is settled or terminal.
 
 ## Reconciliation procedure
 
-Register and arm a BOT-FEEDBACK wake. After it fires, write the first result to a temporary file:
+Register and arm a BOT-FEEDBACK wake. After it fires, keep the first result as a temporary
+observation:
 
-```text
-feedback.rb reconcile --repo OWNER/NAME --pr NUMBER --candidate-sha SHA \
-  --wake-id UUID --baseline-at TIME [--previous PRIOR.json]
+```ruby
+PrGraph::GitHubFeedback.new.reconcile(
+  repo: "OWNER/NAME", pr_number: NUMBER, candidate_sha: SHA,
+  wake_id: UUID, baseline_at: TIME, previous: prior_manifest
+)
 ```
 
 If the result is `pending`, inspect only active automated items without a current ledger entry.
-Create a decisions file using the exact `feedback_id` and `revision` from that observation:
+Write decisions using the exact `feedback_id` and `revision` from that observation:
 
 ```json
 {"decisions":[{"feedback_id":"issue_comment:IC_x","revision":"<sha256>","decision":"clean","reason":"reviewed; no actionable finding"},
  {"feedback_id":"review_comment:PRRC_x","revision":"<sha256>","decision":"fixed","reason":"guarded the nil branch","candidate_sha":"<40-hex>"}]}
 ```
 
-Then reconcile again with the temporary observation as `--previous` and the decisions file as
-`--decisions`. Never persist a `pending` observation as the node's one current output. Persist only
+Then reconcile again with the temporary observation as `previous:` and the decisions as
+`decisions:`. Never persist a `pending` observation as the node's one current output. Persist only
 the terminal `clean` or `findings` result as `bot_feedback`, using the same candidate and fired wake
 in the artifact metadata. Complete a clean node; route findings to BUILD with a stable failure ID
 and the feedback revision.
 
-After BUILD or a later watch, pass the last terminal feedback manifest as `--previous`. Repository,
+After BUILD or a later watch, pass the last terminal feedback manifest as `previous:`. Repository,
 PR, baseline, and author-policy identity must remain stable; candidate and wake identity advance in
 the new manifest. Unchanged remote revisions are not reprocessed. A later edit, resolution, or
 deletion is recorded once as a new revision.
