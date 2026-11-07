@@ -43,9 +43,6 @@
         "MethodLength": 3,
         "ParameterLists": 1
       },
-      "lib/giraffe/steps/build.rb": {
-        "MethodLength": 4
-      },
       "lib/giraffe/steps/preparation.rb": {
         "MethodLength": 3
       },

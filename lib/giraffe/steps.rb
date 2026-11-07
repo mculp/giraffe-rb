@@ -10,7 +10,7 @@ module Giraffe
   # error pauses the run.
   #
   # A module here is not a step but a mixin into Harness, which does a node that has no step as its own step_<node>
-  # method. A mixin can share its node's name, as Steps::Build does, so turning a node into a step means replacing
+  # method. A mixin can share its node's name, as Steps::Verify does, so turning a node into a step means replacing
   # its module with the class, and Harness stops including it.
   module Steps
     def self.for(node)
