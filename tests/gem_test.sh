@@ -26,7 +26,7 @@ ruby -I "$packed/lib" -e '
     abort "#{role} has no instructions" if request.instructions.strip.empty?
   end
   PrGraph::Shapes.build
-  abort "loaded from the checkout, not the gem" unless Giraffe::Model::ROOT.start_with?(ARGV.first)
+  abort "loaded from the checkout, not the gem" unless File.realpath(Giraffe::Model::ROOT) == File.realpath(ARGV.first)
   puts "ok 2: require \"giraffe/rb\" loads every role (#{roles.size}) and contract from the gem"
 ' "$packed"
 grep -q '^  spec.name = "giraffe-rb"' giraffe-rb.gemspec
