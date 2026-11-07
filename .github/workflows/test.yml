@@ -16,8 +16,10 @@ jobs:
       - uses: ruby/setup-ruby@651ff0d62c5c79bed6d53ec518387aae20e72c1a # v1.329.0
         with:
           ruby-version: "3.4"
-          # Installs the Gemfile's development tools (sandi and the RuboCop its baseline was counted with).
+          # Install runtime dependencies and development tools from the lockfile.
           bundler-cache: true
+      # Subprocess probes deliberately run outside Bundler's environment.
       - run: gem install sqlite3 -v 2.10.2 --no-document
+      - run: gem install json_schemer -v 2.5.0 --no-document
       - run: bin/test
       - run: bundle exec sandi

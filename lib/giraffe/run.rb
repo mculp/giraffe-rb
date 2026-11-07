@@ -85,6 +85,9 @@ module Giraffe
     def coordinator = @coordinator ||= store.coordinator(session: state.fetch("session"))
     def events = store.event_log.read(path)
 
+    # The graph this run follows, from its event log's contract. Callers ask the run, so none of them needs to know where it is kept.
+    def graph = store.event_log.contract.fetch("graph")
+
     def save!(proposed = state)
       next_state = proposed.merge("revision" => state.fetch("revision") + 1)
       store.append_state(next_state)

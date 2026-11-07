@@ -1,104 +1,71 @@
 # frozen_string_literal: true
 
-require_relative "../protected_paths"
+require_relative "build/batch"
+require_relative "build/rounds"
+require_relative "build/still_red"
 
 module Giraffe
   module Steps
-    module Build
-      def step_build
-        @git.clean!(worktree)
-        if (saved_review = attempted_artifact("self_review"))
-          return resume_reviewed_build(saved_review)
-        end
+    # BUILD: the writer's edits as commits, then rounds of review until a candidate passes. A candidate whose review
+    # was saved before a crash is not reviewed again, only checked and handed on.
+    class Build
+      def call(context)
+        @context = context
+        git.clean!(worktree)
+        saved = context.attempted_artifact("self_review")
+        saved ? resume(saved) : build
+      end
 
-        plan = artifact("implementation_plan")
+      private
+
+      attr_reader :context
+
+      def git = context.git
+      def worktree = context.worktree
+
+      def build
+        plan = context.artifact("implementation_plan")
         units = plan.fetch("steps")
-        if (feedback = runtime["verification_feedback"])
-          # A red edge from VERIFY is one fix batch; the plan's units are already committed.
-          write_batch("verification-fix", {"plan" => plan, "verification_feedback" => feedback})
-          ask_a_person_if_unchanged(feedback)
-        else
-          units.each { |unit| write_batch(unit.fetch("id"), {"assignment" => unit}) }
-        end
-        reviews = []
-        checks = review = candidate = nil
-        @run.config["max_fix_rounds"].times do |round|
-          head = @git.head(worktree)
-          # A fix that changed nothing, or a resume past recorded fixes, leaves nothing new to check or review.
-          unless head == candidate
-            candidate = head
-            checks = read_only_checks
-            review = ask("review", {"plan" => plan, "diff" => @git.diff(worktree, base_sha), "checks" => checks}, unit: "review-#{round}")
-            reviews << review
-          end
-          blocking = review.fetch("findings").select { |finding| finding["severity"] == "blocking" }
-          if blocking.empty? && checks.all? { |check| check["exit_code"].zero? }
-            raise Error, "BUILD produced no change from the base" if candidate == base_sha
-            # Save the completed review first so recovery can reuse its full history without another model call.
-            put("self_review", {"candidate_sha" => candidate, "reviews" => reviews}, candidate: candidate,
-                perspective: "independent_review", covered: clause_ids)
-            put_build_manifest(candidate, units, checks)
-            finish
-            return
-          end
-          write_batch("fix-#{round}", {"findings" => blocking, "failed_checks" => checks.reject { |check| check["exit_code"].zero? }})
-        end
-        raise Error, "BUILD reached its fix-round limit; the writer remains open for inspection"
+        write_batches(plan, units)
+        conclude(Rounds.new(context, plan).call, units)
       end
 
-      def resume_reviewed_build(review)
+      def write_batches(plan, units)
+        feedback = context.runtime["verification_feedback"]
+        return fix_verification(plan, feedback) if feedback
+        units.each { |unit| Batch.new(context, unit.fetch("id"), {"assignment" => unit}).call }
+      end
+
+      # A red edge from VERIFY is one fix batch; the plan's units are already committed.
+      def fix_verification(plan, feedback)
+        Batch.new(context, "verification-fix", {"plan" => plan, "verification_feedback" => feedback}).call
+        StillRed.new(context, feedback).call
+      end
+
+      def conclude(reviewed, units)
+        raise Error, "BUILD produced no change from the base" if reviewed.candidate == context.base_sha
+        # Save the completed review first so recovery can reuse its full history without another model call.
+        context.put("self_review", reviewed.self_review, candidate: reviewed.candidate, perspective: "independent_review", covered: context.clause_ids)
+        put_manifest(reviewed.candidate, units, reviewed.checks)
+        context.finish
+      end
+
+      def resume(review)
         candidate = review.fetch("candidate_sha")
-        raise Error, "saved BUILD review belongs to a different candidate" unless @git.head(worktree) == candidate
-
-        unless attempted_artifact("build_manifest")
-          checks = read_only_checks
-          raise Error, "saved BUILD candidate no longer passes checks" unless checks.all? { |check| check["exit_code"].zero? }
-          put_build_manifest(candidate, artifact("implementation_plan").fetch("steps"), checks)
-        end
-        finish
+        raise Error, "saved BUILD review belongs to a different candidate" unless git.head(worktree) == candidate
+        put_missing_manifest(candidate) unless context.attempted_artifact("build_manifest")
+        context.finish
       end
 
-      # The same candidate can only come back red, so what BUILD has no edit for is a person's to settle, unless one
-      # has answered since that red, whether this question or one BUILD asked for itself.
-      def ask_a_person_if_unchanged(feedback)
-        return unless @git.head(worktree) == feedback.fetch("candidate_sha") && @run.state["answers"].size == feedback["answers_seen"]
-        open_clauses = feedback.dig("ac_audit", "clauses").to_a.reject { |row| row["verdict"] == "met" }
-        details = open_clauses.map { |row| "#{row['clause_id']}: #{row['reason']}" }.join(" ")
-        pictures = feedback["screenshots"].to_a.map { |shot| shot["path"] }
-        ask_a_person("verification-#{@attempt}", "VERIFY stays red and BUILD found no edit to make: #{feedback.fetch('reason')}. #{details} " \
-                                                 "#{"Its screenshots are #{pictures.join(', ')}. " if pictures.any?}" \
-                                                 "Please answer with evidence, such as what a command printed on #{feedback.fetch('candidate_sha')}, or with what should change.")
+      def put_missing_manifest(candidate)
+        checks = context.read_only_checks
+        raise Error, "saved BUILD candidate no longer passes checks" unless checks.all? { |check| check["exit_code"].zero? }
+        put_manifest(candidate, context.artifact("implementation_plan").fetch("steps"), checks)
       end
 
-      def put_build_manifest(candidate, units, checks)
-        put("build_manifest", {"candidate_sha" => candidate, "base_sha" => base_sha,
-                               "steps" => units.map { |unit| unit["id"] }, "checks" => checks}, candidate: candidate, covered: clause_ids)
-      end
-
-      def write_batch(unit, assignment)
-        key = "build:#{@attempt}:#{unit}"
-        return if runtime.fetch("build_commits", {}).key?(key)
-        trailer = "Giraffe-Unit: #{key}"
-        recovered = @git.call(worktree, "log", "--format=%H", "--fixed-strings", "--grep=#{trailer}", "#{base_sha}..HEAD").lines.map(&:strip)
-        if recovered.any?
-          raise Error, "ambiguous recovered BUILD commit" unless recovered.one?
-          @run.checkpoint_entry("build_commits", key, recovered.first)
-          return
-        end
-        @git.clean!(worktree)
-        ask("build", assignment.merge("test_plan" => artifact("test_plan"), "reproduction" => runtime["reproduction"]), writable: true, unit: unit)
-        guard_changed_paths!
-        # Autocorrect belongs to BUILD; VERIFY runs it read-only and refuses any resulting mutation.
-        @checks.run(worktree, @run.config["lint"])
-        guard_changed_paths!
-        sha = @git.commit(worktree, "#{@run.state.dig('ticket', 'title')}\n\n#{trailer}") || @git.head(worktree)
-        @run.checkpoint_entry("build_commits", key, sha)
-      end
-
-      def guard_changed_paths!
-        protected_paths = ProtectedPaths.new(hooks_prefix: @git.hooks_prefix(worktree))
-        forbidden = protected_paths.among(@git.changed_paths(worktree))
-        raise Error, "BUILD changed protected files: #{forbidden.join(', ')}" if forbidden.any?
+      def put_manifest(candidate, units, checks)
+        context.put("build_manifest", {"candidate_sha" => candidate, "base_sha" => context.base_sha,
+                                       "steps" => units.map { |unit| unit["id"] }, "checks" => checks}, candidate: candidate, covered: context.clause_ids)
       end
     end
   end

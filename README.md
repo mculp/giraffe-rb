@@ -25,8 +25,8 @@ inside is `Giraffe`, and the command is `giraffe`. It isn't published yet, so in
 gem "giraffe-rb", git: "https://github.com/mculp/giraffe-rb"
 ```
 
-`require "giraffe"` and `require "giraffe/rb"` both load it. It needs Ruby 3.4 and no other gems;
-the SQLite backend also needs `sqlite3` ([docs/running.md](docs/running.md)).
+`require "giraffe"` and `require "giraffe/rb"` both load it. It needs Ruby 3.4; Bundler installs
+its `json_schemer` dependency. The SQLite backend also needs `sqlite3` ([docs/running.md](docs/running.md)).
 
 ## Layout
 
@@ -44,9 +44,11 @@ The design's Repository section covers where the harness, runners, and store go.
 
 ## Tests
 
-Needs Ruby 3.4, Python 3, and git.
+Needs Ruby 3.4, Python 3, and git. Install the runtime dependencies first; install `sqlite3`
+separately to exercise the optional SQLite backend.
 
 ```sh
+bundle install
 bin/test
 ```
 

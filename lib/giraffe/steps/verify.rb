@@ -1,6 +1,9 @@
 # frozen_string_literal: true
 
 require_relative "../safe_path"
+require_relative "verify/mutation_proofs"
+require_relative "verify/spec_audit"
+require_relative "verify/spec_command"
 
 module Giraffe
   module Steps
@@ -72,7 +75,7 @@ module Giraffe
         # Before the spec audit, which is not worth paying for on a candidate that has to change.
         broken = content["screens"].select { |row| row["verdict"] == "broken" }
         return "Screens look broken: #{broken.map { |row| "#{row['name']}: #{row['note']}" }.join(' ')}" if broken.any?
-        content["spec_audit"], content["mutation_proofs"] = audit_specs(candidate)
+        content["spec_audit"], content["mutation_proofs"] = SpecAudit.new(@context, candidate).call
         content["regression"] = regression(candidate) if regression_spec_written?(candidate)
         contract_rejection(content)
       rescue BaselineFailed => error
@@ -102,60 +105,17 @@ module Giraffe
         error.message
       end
 
-      def spec_command(ref)
-        path, line = ref.split(":", 2)
-        arguments = line ? @run.config["spec_command"] : whole_file_arguments
-        arguments.map { |arg| arg.gsub("{spec}", path).gsub("{line}", line.to_s) }
-      end
-
-      # "path:" is not a location a framework can load, and an argument carrying only the line means nothing.
-      def whole_file_arguments
-        arguments = @run.config["spec_command"].map { |arg| arg.gsub("{spec}:{line}", "{spec}") }
-        arguments.reject { |arg| arg.include?("{line}") && !arg.include?("{spec}") }
-      end
-
-      # The spec audit section, and beside it the full command results: the shared contract consumes its fixed
-      # fields, so those results are not reported as model-authored mutation verdicts.
-      def audit_specs(candidate)
-        section = {"candidate_sha" => candidate, "base_sha" => base_sha, "specs" => []}
-        paths = PrGraph::SpecAuditContract.changed_spec_paths(worktree, base_sha, candidate)
-        return section, [] if paths.empty?
-        ask("spec_audit", {"test_plan" => artifact("test_plan"), "diff" => @git.diff(worktree, base_sha), "changed_specs" => paths}) do |output|
-          specs = output.fetch("specs")
-          proofs = mutation_proofs(specs, candidate, paths)
-          audited = specs.zip(proofs).map do |spec, proof|
-            spec.slice("ref", "behavior", "classes").merge("mutation" => {"change" => spec.fetch("patch"), "result" => proof["exit_code"].zero? ? "pass" : "fail"})
-          end
-          audit = section.merge("specs" => audited)
-          spec_audit_contract.validate_shape!({"spec_audit" => audit}, candidate_sha: candidate, base_sha: base_sha, spec_paths: paths)
-          [audit, proofs]
-        end
-      end
-
-      def mutation_proofs(specs, candidate, paths)
-        runner = MutationRunner.new(git: @git, checks: @checks, worktree: worktree, candidate: candidate)
-        specs.map do |spec|
-          require_changed_spec_line!(spec.fetch("ref"), paths)
-          runner.prove(spec.fetch("patch"), spec_command(spec["ref"]))
-        end
-      end
-
-      def require_changed_spec_line!(ref, paths)
-        path, line = ref.split(":", 2)
-        return if paths.include?(path) && line.to_s.match?(/\A[1-9][0-9]*\z/) && line.to_i <= File.readlines(SafePath.new(worktree).file(path)).length
-        raise InvalidOutput, "spec audit must cite a real changed spec and line: #{ref}"
-      end
-
       # Both sides run from a clean checkout, so missing generated files cannot pass for the bug being red.
       def regression(candidate)
         path = artifact("repro_report").fetch("rerun")
         source = File.binread(SafePath.new(worktree).file(path))
-        fixed = @git.at_commit(worktree, candidate) { |tree| @checks.run(tree, [spec_command(path)]).first }
+        spec_command = SpecCommand.new(@run.config["spec_command"])
+        fixed = @git.at_commit(worktree, candidate) { |tree| @checks.run(tree, [spec_command.for(path)]).first }
         broken = @git.at_commit(worktree, base_sha) do |tree|
           target = SafePath.new(tree).target(path)
           FileUtils.mkdir_p(File.dirname(target))
           File.binwrite(target, source)
-          @checks.run(tree, [spec_command(path)]).first
+          @checks.run(tree, [spec_command.for(path)]).first
         end
         {"spec" => path, "base" => regression_result(base_sha, broken), "candidate" => regression_result(candidate, fixed)}
       end
