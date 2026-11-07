@@ -13,10 +13,6 @@
       "lib/giraffe/config.rb": {
         "MethodLength": 3
       },
-      "lib/giraffe/graph_view.rb": {
-        "MethodLength": 2,
-        "ParameterLists": 1
-      },
       "lib/giraffe/harness.rb": {
         "MethodLength": 3
       },
