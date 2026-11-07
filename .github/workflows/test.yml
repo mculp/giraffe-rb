@@ -18,6 +18,8 @@ jobs:
           ruby-version: "3.4"
           # Install runtime dependencies and development tools from the lockfile.
           bundler-cache: true
+      # Subprocess probes deliberately run outside Bundler's environment.
       - run: gem install sqlite3 -v 2.10.2 --no-document
+      - run: gem install json_schemer -v 2.5.0 --no-document
       - run: bin/test
       - run: bundle exec sandi
