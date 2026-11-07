@@ -938,17 +938,105 @@ class HarnessTest < Minitest::Test
     assert_refused_in_turn("spec_audit", data, %w[test/greeting_test.rb:99 test/greeting_test.rb:0 app.rb:1].map(&citing))
   end
 
-  def test_spec_command_for_a_line_and_for_a_whole_file
-    {
-      ["rspec", "{spec}:{line}"] => [["rspec", "a_spec.rb:3"], ["rspec", "a_spec.rb"]],
-      ["run", "{spec}", "--line={line}"] => [["run", "a_spec.rb", "--line=3"], ["run", "a_spec.rb"]],
-      ["run", "{spec}", "{line}"] => [["run", "a_spec.rb", "3"], ["run", "a_spec.rb"]],
-      ["sh", "-c", "run {spec} # line {line}"] => [["sh", "-c", "run a_spec.rb # line 3"], ["sh", "-c", "run a_spec.rb # line "]]
-    }.each do |command, (at_line, whole_file)|
-      harness = Giraffe::Harness.new(start(spec_command: command), runner: Giraffe::Runners::Scripted.new({}), github: @github)
-      assert_equal at_line, harness.spec_command("a_spec.rb:3")
-      assert_equal whole_file, harness.spec_command("a_spec.rb")
+  # The last line of a one-line spec is a real line; the one after it is not, and the refusal names the ref it got.
+  def test_spec_audit_citing_the_line_after_a_specs_last_is_refused_naming_the_ref
+    data = bug_script
+    refused = copy(data["spec_audit"][0])
+    refused["specs"][0]["ref"] = "test/greeting_test.rb:2"
+    assert_resume_asks_again("spec_audit", data, refused, %r{\Aspec audit must cite a real changed spec and line: test/greeting_test\.rb:2\z})
+  end
+
+  # A spec the candidate committed as a link has lines nobody can cite: where the link leads is not the candidate's.
+  def test_spec_audit_citing_a_spec_the_candidate_committed_as_a_link_is_refused
+    data = bug_script
+    entry = data["build"][0]
+    data["build"][0] = lambda do |request|
+      FileUtils.mkdir_p(File.join(request[:cwd], "test"))
+      File.symlink("../app.rb", File.join(request[:cwd], "test/linked_test.rb"))
+      entry
     end
+    audit = data["spec_audit"][0]
+    audit["specs"].unshift(audit["specs"][0].merge("ref" => "test/linked_test.rb:1"))
+    error = assert_raises(Giraffe::InvalidOutput) { execute(start_bug, data) }
+    assert_equal "proof file is missing or a symlink: test/linked_test.rb", error.message
+  end
+
+  # The spec prints how it was run, so the evidence shows which form of the command each proof used.
+  def test_a_mutation_is_proved_by_the_spec_at_its_line_and_the_regression_by_the_whole_file
+    data = bug_script
+    spec = data["build"][0]["writes"]["test/greeting_test.rb"]
+    data["build"][0]["writes"]["test/greeting_test.rb"] = %(puts "argv=\#{ARGV.join(',')}"\n) + spec
+    run = start_bug(spec_command: [RbConfig.ruby, "{spec}", "--line={line}"])
+    execute(run, data)
+    assert_equal "draft_pr", run.state["status"]
+    proof = verification_of(run)
+    assert_equal [RbConfig.ruby, "test/greeting_test.rb", "--line=1"], proof.dig("mutation_proofs", 0, "command")
+    assert_equal "argv=--line=1\nwrong greeting\n", proof.dig("mutation_proofs", 0, "excerpt")
+    assert_equal "argv=\nwrong greeting\n", proof.dig("regression", "base", "excerpt")
+    assert_equal "argv=\n", proof.dig("regression", "candidate", "excerpt")
+  end
+
+  # The model is told which specs changed and may only read; what the audit records is the evidence a draft keeps.
+  def test_the_spec_audit_is_asked_about_the_changed_specs_and_records_the_mutation_it_proved
+    data = bug_script
+    run = start_bug
+    execute(run, data)
+    asked = calls_to("spec_audit")
+    assert_equal 1, asked.length
+    refute asked.first[:writable]
+    assert_equal File.join(run.directory, "worktree"), asked.first[:cwd]
+    inputs = JSON.parse(asked.first[:prompt].lines.last).fetch("inputs")
+    assert_equal %w[ticket test_plan diff changed_specs], inputs.keys
+    assert_equal ["test/greeting_test.rb"], inputs["changed_specs"]
+    assert_equal clauses, inputs["test_plan"]["coverage"].map { |row| row["outcome_id"] }
+    assert_includes inputs["diff"], "+++ b/test/greeting_test.rb"
+    proof = verification_of(run)
+    assert_equal %w[candidate_sha checks ac_audit screens spec_audit mutation_proofs regression failures reason], proof.keys
+    assert_recorded_spec_audit(proof, run, [{"ref" => "test/greeting_test.rb:1", "behavior" => "Requested greeting keeps the name", "classes" => [],
+                                             "mutation" => {"change" => MUTATION, "result" => "fail"}}])
+    assert_equal %w[command exit_code excerpt], proof["mutation_proofs"].first.keys
+    assert_equal [[RbConfig.ruby, "test/greeting_test.rb"], 1], proof["mutation_proofs"].first.values_at("command", "exit_code")
+  end
+
+  def assert_recorded_spec_audit(proof, run, specs)
+    section = proof.fetch("spec_audit")
+    assert_equal %w[candidate_sha base_sha specs], section.keys
+    assert_equal [proof["candidate_sha"], run.state.dig("runtime", "base_sha")], section.values_at("candidate_sha", "base_sha")
+    assert_equal specs, section["specs"]
+    assert_equal [%w[ref behavior classes mutation]] * specs.length, section["specs"].map(&:keys)
+    assert_equal [%w[change result]] * specs.length, section["specs"].map { |spec| spec["mutation"].keys }
+  end
+
+  # A candidate that changes no spec owes no audit, and the record says so rather than leaving the section out.
+  def test_a_candidate_that_changes_no_spec_is_audited_for_none_and_proves_nothing
+    run = start
+    execute(run)
+    assert_empty calls_to("spec_audit")
+    proof = verification_of(run)
+    assert_equal %w[candidate_sha checks ac_audit screens spec_audit mutation_proofs failures reason], proof.keys
+    assert_recorded_spec_audit(proof, run, [])
+    assert_equal [], proof["mutation_proofs"]
+  end
+
+  # One spec pins the greeting and one does not: the survivor is the one the evidence and the red reason name.
+  def test_each_proof_is_reported_for_the_spec_it_was_run_for
+    data = bug_script
+    pinning = data["build"][0]["writes"]["test/greeting_test.rb"]
+    data["build"][0]["writes"]["test/other_test.rb"] = "exit 0\n"
+    with_fix_rounds(data, 1, "test/other_test.rb" => pinning)
+    both = copy(data["spec_audit"][0])
+    both["specs"] << both["specs"][0].merge("ref" => "test/other_test.rb:1")
+    data["spec_audit"] = [both, both]
+    run = start_bug
+    execute(run, data)
+    assert_equal "draft_pr", run.state["status"]
+    red = run.state.dig("runtime", "verification_feedback")
+    assert_equal [%w[test/greeting_test.rb:1 fail], %w[test/other_test.rb:1 pass]], red.dig("spec_audit", "specs").map { |spec| [spec["ref"], spec.dig("mutation", "result")] }
+    assert_match %r{test/other_test\.rb:1 \(passes_without_change\)}, red["reason"]
+    refute_includes red["reason"], "greeting_test"
+    green = verification_of(run)
+    assert_equal [%w[test/greeting_test.rb:1 fail], %w[test/other_test.rb:1 fail]], green.dig("spec_audit", "specs").map { |spec| [spec["ref"], spec.dig("mutation", "result")] }
+    assert_equal [[RbConfig.ruby, "test/greeting_test.rb"], [RbConfig.ruby, "test/other_test.rb"]], green["mutation_proofs"].map { |row| row["command"] }
   end
 
   def test_refused_triage_is_asked_again_on_resume

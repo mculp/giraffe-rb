@@ -50,8 +50,7 @@
         "MethodLength": 3
       },
       "lib/giraffe/steps/verify.rb": {
-        "MethodLength": 6,
-        "ModuleLength": 1
+        "MethodLength": 5
       },
       "lib/giraffe/store.rb": {
         "ClassLength": 1,
