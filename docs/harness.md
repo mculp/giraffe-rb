@@ -79,9 +79,9 @@ plugin can make it run a step it skipped.
 
 - Harness code calls `scripts/` as subprocesses with JSON in and out, the way the skill does. A
   script moves into `lib/giraffe/` when the harness needs it in process.
-- `scripts/` and `references/` keep the plugin's relative paths, so a fix ports between this repo
-  and the plugin as the same diff. Until `/giraffe` calls this repo, the pr-graph plugin runs its
-  own copy, and a fix to a shared script lands in both.
+- giraffe-rb owns `scripts/` and `references/`: a fix here is not ported to the pr-graph plugin.
+  Until `/giraffe` replaces the plugin, the plugin runs its own copy, which this repo's changes
+  do not reach.
 - `push_guard.rb`, `program_driver.sh`, and the plugin's Cursor installer are not here; What stays
   and what goes covers the first two.
 
