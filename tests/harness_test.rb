@@ -1046,7 +1046,7 @@ class HarnessTest < Minitest::Test
   end
 
   def test_output_the_schema_refuses_is_asked_again_on_resume
-    assert_resume_asks_again("triage", script, {"questions" => [], "summary" => "thin"}, /outcome_register is required/)
+    assert_resume_asks_again("triage", script, {"questions" => [], "summary" => "thin"}, /missing required properties: outcome_register/)
   end
 
   def test_output_carrying_a_secret_is_asked_again_on_resume
@@ -1312,12 +1312,19 @@ class HarnessTest < Minitest::Test
   end
 
   def test_one_of_reports_what_each_shape_lacks_and_refuses_an_output_fitting_both
+    refusal = ->(schema, value) { assert_raises(Giraffe::InvalidOutput) { Giraffe::Schema.validate!(schema, value) }.message }
     either = {"oneOf" => [{"type" => "object", "required" => ["a"]}, {"type" => "object", "required" => ["b"]}]}
-    assert_empty Giraffe::Schema.errors(either, {"a" => 1})
-    assert_equal ["$ must match exactly one of: $.a is required OR $.b is required"], Giraffe::Schema.errors(either, {})
-    assert_equal ["$ must match exactly one of: matched OR matched"], Giraffe::Schema.errors(either, {"a" => 1, "b" => 1})
-    long = {"oneOf" => [{"type" => "object", "required" => ("a".."z").to_a}, {"type" => "array"}]}
-    assert_equal 8, Giraffe::Schema.errors(long, {}).first.scan("is required").length, "a refusal stays short enough to store"
+    assert_equal({"a" => 1}, Giraffe::Schema.validate!(either, {"a" => 1}))
+    assert_equal "output must match exactly one of: object at root is missing required properties: a OR object at root is missing required properties: b", refusal[either, {}]
+    assert_match(/does not match exactly one/, refusal[either, {"a" => 1, "b" => 1}])
+    long = {"oneOf" => [{"type" => "array", "items" => {"type" => "string"}}, {"type" => "object"}]}
+    assert_equal 8, refusal[long, Array.new(20, 1)].scan("is not a string").length, "a refusal stays short enough to store"
+  end
+
+  def test_a_schema_json_schemer_calls_invalid_is_refused
+    assert_equal({"type" => "object"}, Giraffe::Schema.check!({"type" => "object"}))
+    error = assert_raises(Giraffe::InvalidOutput) { Giraffe::Schema.check!({"type" => "bogus"}) }
+    assert_match(%r{\Ainvalid schema: .*`/type`}, error.message)
   end
 
   def test_runner_reporting_an_impossible_cost_keeps_its_reservation
@@ -2521,7 +2528,7 @@ class HarnessTest < Minitest::Test
     key, kept = Giraffe::CallLedger.new(run).entries.find { |_key, entry| entry["role"] == "investigate" && entry["output"] }
     run.checkpoint_entry("calls", key, kept.merge("output" => {"questions" => []}))
     asked = runner.calls.length
-    assert_match(/summary is required/, assert_raises(Giraffe::InvalidOutput) { execute(run, runner) }.message)
+    assert_match(/missing required properties: summary/, assert_raises(Giraffe::InvalidOutput) { execute(run, runner) }.message)
     assert_equal asked, runner.calls.length
   end
 

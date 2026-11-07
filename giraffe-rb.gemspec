@@ -22,6 +22,7 @@ Gem::Specification.new do |spec|
   spec.bindir = "bin"
   spec.executables = ["giraffe"]
 
-  # None at run time: giraffe uses the standard library. The SQLite backend loads the sqlite3 gem only when it is
-  # chosen, and says to install it when it is missing (docs/running.md).
+  spec.add_dependency "json_schemer", "~> 2.5"
+
+  # The SQLite backend loads sqlite3 only when chosen (docs/running.md).
 end
