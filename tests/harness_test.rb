@@ -229,6 +229,46 @@ class HarnessTest < Minitest::Test
     assert_empty @github.calls
   end
 
+  # What a step put under a family, read from the file the coordinator holds it in.
+  def kept_artifact(run, family)
+    record = run.coordinator.snapshot["artifacts"].find { |row| row["family"] == family && row["status"] == "current" }
+    JSON.parse(File.read(File.join(run.directory, record["content_ref"])))
+  end
+
+  # What each call to a role was shown, apart from its instructions.
+  def inputs_of_calls_to(role) = calls_to(role).map { |call| JSON.parse(call[:prompt].lines.last).fetch("inputs") }
+
+  def test_the_steps_before_build_put_what_the_later_steps_read_and_ask_what_their_prompts_expect
+    File.write(File.join(@repo, "app.rb"), "puts 'not pushed'\n")
+    @git.commit(@repo, "ahead of origin/main")
+    base = @git.call(@repo, "rev-parse", "origin/main")
+    data = script
+    data["investigate"] = %w[ticket prior_art codebase].map { |perspective| {"questions" => [], "summary" => "Read the #{perspective}", "findings" => []} }
+    data["build"] = [Giraffe::Error.new("stopped at BUILD")]
+    run = start(screen_checks: [["true"]])
+    assert_equal "stopped at BUILD", assert_raises(Giraffe::Error) { execute(run, data) }.message
+    tree = File.join(run.directory, "worktree")
+    brief = triage.merge("ticket" => ticket)
+    assert_equal %w[triage_brief worktree_manifest investigation_report repro_report implementation_plan test_plan],
+                 run.coordinator.snapshot["artifacts"].map { |row| row["family"] }
+    assert_equal brief, kept_artifact(run, "triage_brief")
+    assert_equal({"path" => File.realpath(tree), "branch" => "codex/giraffe-#{run.id}", "base_sha" => base,
+                  "common_git_dir" => File.realpath(File.join(@repo, ".git"))}, kept_artifact(run, "worktree_manifest"))
+    assert_equal base, run.state.dig("runtime", "base_sha"), "the base the worktree was cut from is kept for the steps after it"
+    assert_equal({"reports" => %w[ticket prior_art codebase].zip(data["investigate"]).to_h}, kept_artifact(run, "investigation_report"))
+    assert_equal({"status" => "not_applicable", "base_sha" => base, "reason" => "Ticket triage identifies a feature, not a reported defect."},
+                 kept_artifact(run, "repro_report"))
+    assert_equal data["plan"][0]["implementation_plan"], kept_artifact(run, "implementation_plan")
+    assert_equal data["plan"][0]["test_plan"], kept_artifact(run, "test_plan")
+    assert_equal false, run.state.dig("runtime", "ui")
+    assert_equal [["triage", @repo, false], *[["investigate", tree, false]] * 3, ["plan", tree, false], ["build", tree, true]],
+                 @runner.calls.map { |call| call.values_at(:step, :cwd, :writable) }
+    assert_equal [{"ticket" => ticket}], inputs_of_calls_to("triage")
+    assert_equal %w[ticket prior_art codebase].map { |perspective| {"ticket" => ticket, "perspective" => perspective, "triage" => brief} }, inputs_of_calls_to("investigate")
+    assert_equal [{"ticket" => ticket, "triage" => brief, "investigation" => kept_artifact(run, "investigation_report"),
+                   "reproduction" => kept_artifact(run, "repro_report"), "screen_checks" => [["true"]]}], inputs_of_calls_to("plan")
+  end
+
   def test_read_only_model_mutation_is_refused
     run = start
     data = script
@@ -933,6 +973,31 @@ class HarnessTest < Minitest::Test
                              /could not reproduce.*expected exit 7.*got exit 1.*wrong greeting/)
   end
 
+  def test_probe_that_exits_as_said_but_prints_something_else_is_asked_again_on_resume
+    data = bug_script
+    assert_resume_asks_again("reproduce", data, data["reproduce"][0].merge("expected_output" => "something else"),
+                             /\Athe harness could not reproduce the reported base behavior: expected exit 1 and output containing something else, got exit 1: wrong greeting\z/)
+  end
+
+  def test_a_regression_spec_wrong_in_two_ways_is_refused_for_the_first_of_them
+    FileUtils.mkdir_p(File.join(@repo, "a b"))
+    File.write(File.join(@repo, "a b/helper.rb"), "")
+    File.write(File.join(@repo, ".gitignore"), "generated/\n")
+    data = bug_script
+    output = data["investigate"][1]
+    # Git ignores what a model leaves in the ignored directory, so the worktree stays as clean as it was made.
+    data["investigate"][0] = lambda do |request|
+      FileUtils.mkdir_p(File.join(request[:cwd], "generated"))
+      File.write(File.join(request[:cwd], "generated/helper.rb"), "")
+      output
+    end
+    reproduce = data["reproduce"][0]
+    assert_refused_in_turn("reproduce", data, [
+      [reproduce.merge("regression_spec" => "a b"), /\Aregression_spec must be a file path, not a command or filter: a b\z/],
+      [reproduce.merge("regression_spec" => "generated"), /\Aregression_spec must be a file path, not a directory: generated\z/]
+    ])
+  end
+
   def test_probe_cannot_touch_the_worktree
     data = bug_script
     data["reproduce"][0]["source"] = 'File.write("scratch.txt", "x"); ' + data["reproduce"][0]["source"]
@@ -945,6 +1010,64 @@ class HarnessTest < Minitest::Test
   def test_refused_repro_report_is_asked_again_on_resume
     data = bug_script
     assert_resume_asks_again("reproduce", data, data["reproduce"][0].merge("clause_ids" => ["outcome:unknown"]), /unknown outcome clause/)
+  end
+
+  def test_a_reproduced_defect_is_reported_and_the_probe_that_showed_it_is_kept_where_a_resume_finds_it
+    data = bug_script
+    reproduced = data["reproduce"][0]
+    data["reproduce"].unshift(reproduced.merge("source" => "# a probe that does not show it\n#{reproduced['source']}", "expected_exit" => 7))
+    data["build"] = [Giraffe::Error.new("stopped at BUILD")]
+    runner = Giraffe::Runners::Scripted.new(data)
+    run = start_bug
+    probe = File.join(run.directory, "probe/probe.rb")
+    assert_match(/could not reproduce/, assert_raises(Giraffe::InvalidOutput) { execute(run, runner) }.message)
+    assert_equal data["reproduce"][0]["source"], File.read(probe)
+    assert_equal "stopped at BUILD", assert_raises(Giraffe::Error) { execute(run, runner) }.message
+    assert_equal reproduced["source"], File.read(probe), "the probe written again replaces the one before"
+    assert_equal [0o700, 0o600], [File.dirname(probe), probe].map { |path| File.stat(path).mode & 0o777 }
+    assert_equal reproduced, run.state.dig("runtime", "reproduction")
+    assert_equal reproduced.slice("steps", "expected", "observed", "code_path", "clause_ids").merge(
+      "status" => "reproduced", "base_sha" => run.state.dig("runtime", "base_sha"), "rerun" => "test/greeting_test.rb",
+      "evidence" => [{"command" => "ruby stored-probe.rb", "excerpt" => "wrong greeting\n"}]), kept_artifact(run, "repro_report")
+    assert_equal [{"ticket" => ticket, "investigation" => kept_artifact(run, "investigation_report"), "outcomes" => clauses,
+                   "base_sha" => run.state.dig("runtime", "base_sha")}] * 2, inputs_of_calls_to("reproduce")
+  end
+
+  # Stops the process the way a kill would, as the node's attempt is about to end.
+  def crash_as_attempt_finishes(run, node)
+    run.coordinator.define_singleton_method(:complete) { |name, *rest, **options| name == node ? raise(Crash) : super(name, *rest, **options) }
+  end
+
+  # The same, as an artifact of the family is about to be put.
+  def crash_as_artifact_is_put(run, family)
+    run.coordinator.define_singleton_method(:put_artifact) { |metadata, content, **options| metadata["family"] == family ? raise(Crash) : super(metadata, content, **options) }
+  end
+
+  def test_a_reproduction_reported_before_a_crash_is_finished_without_running_its_probe_again
+    data = bug_script
+    runs = File.join(@tmp, "probe-runs")
+    data["reproduce"][0]["source"] = %(File.write(#{runs.inspect}, "x", mode: "a"); #{data['reproduce'][0]['source']})
+    runner = Giraffe::Runners::Scripted.new(data)
+    run = start_bug
+    crash_as_attempt_finishes(run, "REPRODUCE")
+    assert_raises(Crash) { execute(run, runner) }
+    resumed = Giraffe::Run.load(run.path)
+    execute(resumed, runner)
+    assert_equal "draft_pr", resumed.state["status"]
+    assert_equal "x", File.read(runs), "the probe ran once, before the crash"
+  end
+
+  def test_a_crash_as_the_reproduction_is_reported_leaves_it_kept_for_the_steps_after
+    data = bug_script
+    runner = Giraffe::Runners::Scripted.new(data)
+    run = start_bug
+    crash_as_artifact_is_put(run, "repro_report")
+    assert_raises(Crash) { execute(run, runner) }
+    assert_equal data["reproduce"][0], run.state.dig("runtime", "reproduction")
+    resumed = Giraffe::Run.load(run.path)
+    execute(resumed, runner)
+    assert_equal "draft_pr", resumed.state["status"]
+    assert_equal 1, runner.calls.count { |call| call[:step] == "reproduce" }
   end
 
   def test_plan_the_repro_contract_refuses_is_not_saved_and_is_asked_again_on_resume
@@ -1859,6 +1982,89 @@ class HarnessTest < Minitest::Test
     execute(run)
     assert_equal "draft_pr", run.state["status"]
     refute File.exist?(ran)
+  end
+
+  def test_publishing_hands_github_what_the_run_names_and_the_model_wrote
+    run = start(pr_base: "develop")
+    execute(run)
+    tree = File.join(run.directory, "worktree")
+    body = script["pr_body"][0]
+    assert_equal [{repo: "example/app", worktree: tree, base: "develop", head: "codex/giraffe-#{run.id}", title: body["title"],
+                   body_file: File.join(run.directory, "pr-body.md")}], @github.calls
+    assert_equal body["body"], File.read(@github.calls[0][:body_file])
+    assert_equal 0o600, File.stat(@github.calls[0][:body_file]).mode & 0o777
+    assert_equal [{"ticket" => ticket, "diff" => @git.diff(tree, run.state.dig("runtime", "base_sha")), "verification" => kept_artifact(run, "verification"),
+                   "ui_proof_pending" => false}], inputs_of_calls_to("pr_body")
+    published = run.coordinator.snapshot["artifacts"].find { |row| row["family"] == "publish_manifest" }
+    assert_equal ["external_service", @git.head(tree)], published.values_at("perspective", "candidate_sha")
+  end
+
+  def test_the_pull_request_text_is_asked_for_knowing_that_ui_proof_is_pending
+    data = script
+    data["plan"][0]["ui"] = true
+    runner = Giraffe::Runners::Scripted.new(data)
+    run = start
+    execute(run, runner)
+    run.answer(run.state["questions"].first["id"], "All of it is on the screen")
+    execute(run, runner)
+    assert_equal "draft_pr", run.state["status"]
+    assert_equal [true], inputs_of_calls_to("pr_body").map { |inputs| inputs["ui_proof_pending"] }
+  end
+
+  # A GitHub whose publication comes back changed by the block.
+  def github_answering(&change)
+    FakeGitHub.new.tap { |github| github.define_singleton_method(:publish) { |**args| super(**args).tap(&change) } }
+  end
+
+  def test_a_publication_that_is_not_a_draft_of_this_repository_is_not_recorded_or_finished
+    run = start
+    {"publication did not produce a draft PR" => ->(manifest) { manifest["pull_request"]["is_draft"] = false },
+     "publication returned a different repository" => ->(manifest) { manifest["repository"]["name_with_owner"] = "someone/else" }}.each do |message, change|
+      @github = github_answering(&change)
+      assert_equal message, assert_raises(Giraffe::Error) { execute(run) }.message
+      assert_equal "paused", run.state["status"]
+      refute run.coordinator.snapshot["artifacts"].any? { |row| row["family"] == "publish_manifest" }, message
+    end
+    @github = github_answering { |manifest| manifest["repository"]["name_with_owner"] = "Example/App" }
+    execute(run)
+    assert_equal "draft_pr", run.state["status"], "a repository is the same whatever its case"
+  end
+
+  # A GitHub that remembers the pull request it published, and answers when asked again with what a test says changed.
+  class RecoveryGitHub < FakeGitHub
+    attr_reader :asked
+    attr_accessor :now
+
+    def initialize
+      super
+      @asked, @now = [], {}
+    end
+
+    def publish(**args) = super.tap { |manifest| @published = manifest }
+
+    def reconcile_pr(repo:, pr_number:)
+      @asked << [repo, pr_number]
+      @published.merge("action" => "reconciled", "pull_request" => @published["pull_request"].merge(now))
+    end
+  end
+
+  def test_a_publish_that_stopped_after_its_pull_request_existed_finishes_only_if_github_still_says_so
+    @github = RecoveryGitHub.new
+    run = start
+    crash_as_attempt_finishes(run, "PUBLISH")
+    assert_raises(Crash) { execute(run) }
+    changes = [{"head_sha" => "f" * 40}, {"is_draft" => false}, {"state" => "closed"}, {"id" => "pr-2"}]
+    changes.each do |now|
+      @github.now = now
+      error = assert_raises(Giraffe::Error) { execute(Giraffe::Run.load(run.path)) }
+      assert_equal "published PR changed during recovery", error.message, now.inspect
+    end
+    @github.now = {}
+    resumed = Giraffe::Run.load(run.path)
+    execute(resumed)
+    assert_equal "draft_pr", resumed.state["status"]
+    assert_equal 1, @github.calls.length, "the pull request is not published again"
+    assert_equal [["example/app", 12]] * (changes.size + 1), @github.asked, "each resume asked GitHub about the pull request the first one made"
   end
 
   def test_feedback_to_build_leaves_out_the_raw_mutation_proofs
